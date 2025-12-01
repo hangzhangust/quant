@@ -30,7 +30,7 @@ class ResultsDisplay:
 
     def create_results_dataframe(self, batch_results: Dict) -> pd.DataFrame:
         """
-        创建结果表格数据框
+        创建结果表格数据框 - 支持单策略和多策略模式
 
         Args:
             batch_results: 批量回测结果
@@ -39,57 +39,13 @@ class ResultsDisplay:
             格式化的结果DataFrame
         """
         try:
-            individual_results = batch_results.get('individual_results', {})
-            successful_results = [r for r in individual_results.values() if r.get('success', False)]
+            # 检测结果类型
+            is_multi_strategy = self._detect_multi_strategy(batch_results)
 
-            if not successful_results:
-                return self._create_empty_dataframe()
-
-            data_rows = []
-
-            for result in successful_results:
-                config = result.get('config', {})
-                metrics = result.get('metrics', {})
-                basic_metrics = metrics.get('basic_metrics', {})
-                trading_metrics = metrics.get('trading_metrics', {})
-                risk_metrics = metrics.get('risk_metrics', {})
-
-                row = {
-                    'ETF名称': result.get('stock_name', ''),
-                    'ETF代码': result.get('symbol', ''),
-                    '当前设置': f"卖出{config.get('sell_percentage', 0):.1f}%/买入{config.get('buy_percentage', 0):.1f}%",
-                    '总收益率': basic_metrics.get('total_return', 0),
-                    '年化收益率': basic_metrics.get('annual_return', 0),
-                    '最大回撤': basic_metrics.get('max_drawdown', 0),
-                    '夏普比率': basic_metrics.get('sharpe_ratio', 0),
-                    '胜率': trading_metrics.get('win_rate', 0),
-                    '交易次数': trading_metrics.get('total_trades', 0),
-                    '平均持仓天数': trading_metrics.get('avg_holding_period', 0),
-                    '总交易成本': trading_metrics.get('total_commission', 0),
-                    'VaR(95%)': risk_metrics.get('var_95', 0),
-                    '年化波动率': risk_metrics.get('volatility', 0),
-                    '最大连续亏损': risk_metrics.get('max_consecutive_losses', 0),
-                    '贝塔系数': risk_metrics.get('beta', 1.0),
-                    '优化建议': self._format_optimization_suggestions(result.get('optimization_suggestions', [])),
-                    '风险评级': result.get('risk_rating', '未知'),
-                    '数据质量': result.get('data_quality', {}).get('quality_score', 0),
-                    '最后更新': result.get('backtest_time', '')
-                }
-                data_rows.append(row)
-
-            df = pd.DataFrame(data_rows)
-
-            # 格式化数值列
-            numeric_columns = ['总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率',
-                              '平均持仓天数', '总交易成本', 'VaR(95%)', '年化波动率',
-                              '最大连续亏损', '贝塔系数', '数据质量']
-
-            for col in numeric_columns:
-                if col in df.columns:
-                    df[col] = df[col].apply(self._format_numeric_value)
-
-            return df
-
+            if is_multi_strategy:
+                return self._create_multi_strategy_dataframe(batch_results)
+            else:
+                return self._create_single_strategy_dataframe(batch_results)
         except Exception as e:
             logger.error(f"创建结果DataFrame失败: {e}")
             return self._create_empty_dataframe()
@@ -136,9 +92,193 @@ class ResultsDisplay:
             'ETF名称', 'ETF代码', '当前设置', '总收益率', '年化收益率', '最大回撤',
             '夏普比率', '胜率', '交易次数', '平均持仓天数', '总交易成本',
             'VaR(95%)', '年化波动率', '最大连续亏损', '贝塔系数',
-            '优化建议', '风险评级', '数据质量', '最后更新'
+            '优化建议', '风险评级', '数据质量', '最后更新', '策略类型'
         ]
         return pd.DataFrame(columns=columns)
+
+    def _detect_multi_strategy(self, batch_results: Dict) -> bool:
+        """检测是否为多策略结果"""
+        try:
+            individual_results = batch_results.get('individual_results', {})
+
+            # 检查是否有结果包含strategies字段
+            for result in individual_results.values():
+                if result.get('strategies') and isinstance(result['strategies'], dict):
+                    return True
+
+            # 检查summary_stats中是否有strategy_stats
+            summary_stats = batch_results.get('summary_stats', {})
+            if 'strategy_stats' in summary_stats:
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    def _create_single_strategy_dataframe(self, batch_results: Dict) -> pd.DataFrame:
+        """创建单策略DataFrame - 保持原有逻辑"""
+        try:
+            individual_results = batch_results.get('individual_results', {})
+            successful_results = [r for r in individual_results.values() if r.get('success', False)]
+
+            if not successful_results:
+                return self._create_empty_dataframe()
+
+            data_rows = []
+
+            for result in successful_results:
+                row_data = self._extract_strategy_data(result, None)
+                data_rows.append(row_data)
+
+            df = pd.DataFrame(data_rows)
+            return self._format_dataframe(df)
+
+        except Exception as e:
+            logger.error(f"创建单策略DataFrame失败: {e}")
+            return self._create_empty_dataframe()
+
+    def _create_multi_strategy_dataframe(self, batch_results: Dict) -> pd.DataFrame:
+        """创建多策略DataFrame - 扁平化处理"""
+        try:
+            individual_results = batch_results.get('individual_results', {})
+            data_rows = []
+
+            for symbol, result in individual_results.items():
+                if not result.get('success', False):
+                    continue
+
+                strategies = result.get('strategies', {})
+
+                # 如果没有strategies字段，但有直接的数据，当作单策略处理
+                if not strategies and result.get('metrics'):
+                    row_data = self._extract_strategy_data(result, None)
+                    data_rows.append(row_data)
+                else:
+                    # 处理多策略数据
+                    for strategy_type, strategy_result in strategies.items():
+                        if strategy_result.get('success', False):
+                            row_data = self._extract_strategy_data(strategy_result, strategy_type)
+                            data_rows.append(row_data)
+
+            if not data_rows:
+                return self._create_empty_dataframe()
+
+            df = pd.DataFrame(data_rows)
+            return self._format_dataframe(df)
+
+        except Exception as e:
+            logger.error(f"创建多策略DataFrame失败: {e}")
+            return self._create_empty_dataframe()
+
+    def _extract_strategy_data(self, result: Dict, strategy_type: Optional[str]) -> Dict:
+        """提取策略数据"""
+        try:
+            config = result.get('config', {})
+            metrics = result.get('metrics', {})
+            basic_metrics = metrics.get('basic_metrics', {})
+            trading_metrics = metrics.get('trading_metrics', {})
+            risk_metrics = metrics.get('risk_metrics', {})
+
+            row = {
+                'ETF名称': result.get('stock_name', ''),
+                'ETF代码': result.get('symbol', ''),
+                '策略类型': self._format_strategy_type(strategy_type),
+                '当前设置': f"卖出{config.get('sell_percentage', 0):.1f}%/买入{config.get('buy_percentage', 0):.1f}%",
+                '总收益率': basic_metrics.get('total_return', 0),
+                '年化收益率': basic_metrics.get('annual_return', 0),
+                '最大回撤': basic_metrics.get('max_drawdown', 0),
+                '夏普比率': basic_metrics.get('sharpe_ratio', 0),
+                '胜率': trading_metrics.get('win_rate', 0),
+                '交易次数': trading_metrics.get('total_trades', 0),
+                '平均持仓天数': trading_metrics.get('avg_holding_period', 0),
+                '总交易成本': trading_metrics.get('total_commission', 0),
+                'VaR(95%)': risk_metrics.get('var_95', 0),
+                '年化波动率': risk_metrics.get('volatility', 0),
+                '最大连续亏损': risk_metrics.get('max_consecutive_losses', 0),
+                '贝塔系数': risk_metrics.get('beta', 1.0),
+                '优化建议': self._format_optimization_suggestions(result.get('optimization_suggestions', [])),
+                '风险评级': result.get('risk_rating', '未知'),
+                '数据质量': result.get('data_quality', {}).get('quality_score', 0),
+                '最后更新': result.get('backtest_time', '')
+            }
+            return row
+
+        except Exception as e:
+            logger.error(f"提取策略数据失败: {e}")
+            return self._get_empty_row(strategy_type)
+
+    def _format_strategy_type(self, strategy_type: Optional[str]) -> str:
+        """格式化策略类型显示"""
+        if not strategy_type:
+            return "默认策略"
+
+        strategy_names = {
+            'basic_grid': '基础网格策略',
+            'dynamic_grid': '动态网格策略',
+            'martingale_grid': '马丁格尔网格策略'
+        }
+        return strategy_names.get(strategy_type, strategy_type)
+
+    def _get_empty_row(self, strategy_type: Optional[str]) -> Dict:
+        """获取空数据行"""
+        return {
+            'ETF名称': '',
+            'ETF代码': '',
+            '策略类型': self._format_strategy_type(strategy_type),
+            '当前设置': '',
+            '总收益率': 0,
+            '年化收益率': 0,
+            '最大回撤': 0,
+            '夏普比率': 0,
+            '胜率': 0,
+            '交易次数': 0,
+            '平均持仓天数': 0,
+            '总交易成本': 0,
+            'VaR(95%)': 0,
+            '年化波动率': 0,
+            '最大连续亏损': 0,
+            '贝塔系数': 1.0,
+            '优化建议': '无数据',
+            '风险评级': '未知',
+            '数据质量': 0,
+            '最后更新': ''
+        }
+
+    def _format_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """格式化DataFrame数值列"""
+        try:
+            # 如果是单策略，移除策略类型列
+            if '策略类型' in df.columns and df['策略类型'].nunique() == 1 and df['策略类型'].iloc[0] == "默认策略":
+                df = df.drop('策略类型', axis=1)
+
+            # 格式化数值列
+            numeric_columns = ['总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率',
+                              '平均持仓天数', '总交易成本', 'VaR(95%)', '年化波动率',
+                              '最大连续亏损', '贝塔系数', '数据质量']
+
+            for col in numeric_columns:
+                if col in df.columns:
+                    df[col] = df[col].apply(self._format_numeric_value)
+
+            return df
+
+        except Exception as e:
+            logger.error(f"格式化DataFrame失败: {e}")
+            return df
+
+    def get_available_strategies(self, batch_results: Dict) -> List[str]:
+        """获取可用策略列表"""
+        try:
+            strategies = set()
+            individual_results = batch_results.get('individual_results', {})
+
+            for result in individual_results.values():
+                if result.get('strategies') and isinstance(result['strategies'], dict):
+                    strategies.update(result['strategies'].keys())
+
+            return sorted(list(strategies)) if strategies else []
+        except Exception:
+            return []
 
     def display_summary_statistics(self, batch_results: Dict):
         """显示汇总统计信息"""
