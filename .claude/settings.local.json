@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(dir:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(streamlit run:*)",
+      "Bash(timeout:*)",
+      "WebSearch"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
