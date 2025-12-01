@@ -404,22 +404,78 @@ def display_results(batch_results: Dict):
             tab1, tab2, tab3 = st.tabs(["📊 结果表格", "📈 统计分析", "📥 导出报告"])
 
         with tab1:
+            # 策略选择器（仅在多策略模式下显示）
+            if is_multi_strategy:
+                # 获取可用策略类型
+                available_strategies = display.get_available_strategies(batch_results)
+
+                if available_strategies:
+                    # 初始化session_state
+                    if 'selected_strategies' not in st.session_state:
+                        st.session_state.selected_strategies = available_strategies
+
+                    # 策略选择器
+                    selected_strategies = st.multiselect(
+                        "选择要显示的策略",
+                        options=available_strategies,
+                        default=st.session_state.selected_strategies,
+                        format_func=lambda x: {
+                            'basic_grid': '基础网格策略',
+                            'dynamic_grid': '动态网格策略',
+                            'martingale_grid': '马丁格尔网格策略'
+                        }.get(x, x),
+                        help="选择要同时显示的网格策略类型"
+                    )
+
+                    # 更新session_state
+                    st.session_state.selected_strategies = selected_strategies
+
+                    # 根据策略选择过滤结果
+                    if selected_strategies:
+                        # 检查是否有策略类型列
+                        if '策略类型' in results_df.columns:
+                            # 使用策略显示名称进行过滤
+                            strategy_filter_map = {
+                                'basic_grid': '基础网格策略',
+                                'dynamic_grid': '动态网格策略',
+                                'martingale_grid': '马丁格尔网格策略'
+                            }
+                            display_names = [strategy_filter_map[s] for s in selected_strategies]
+                            filtered_df = results_df[results_df['策略类型'].isin(display_names)]
+                        else:
+                            filtered_df = results_df
+                    else:
+                        st.warning("⚠️ 请至少选择一个策略类型")
+                        filtered_df = results_df
+                else:
+                    st.warning("⚠️ 未检测到策略数据")
+                    filtered_df = results_df
+            else:
+                # 单策略模式，使用原始结果
+                filtered_df = results_df
+
             # ETF选择器
-            etf_names = results_df['ETF名称'].tolist()
-            selected_etf_name = st.selectbox("选择ETF查看详细分析", options=etf_names)
+            if not filtered_df.empty:
+                etf_names = filtered_df['ETF名称'].unique().tolist()
+                if etf_names:
+                    selected_etf_name = st.selectbox("选择ETF查看详细分析", options=etf_names)
 
-            # 找到对应的ETF代码
-            selected_etf = results_df[results_df['ETF名称'] == selected_etf_name]['ETF代码'].iloc[0]
-            st.session_state.selected_etf = selected_etf
+                    # 找到对应的ETF代码
+                    selected_etf = filtered_df[filtered_df['ETF名称'] == selected_etf_name]['ETF代码'].iloc[0]
+                    st.session_state.selected_etf = selected_etf
 
-            # 显示结果表格
-            st.subheader("📊 回测结果表格")
-            display.display_results_table(results_df)
+                    # 显示结果表格
+                    st.subheader("📊 回测结果表格")
+                    display.display_results_table(filtered_df)
 
-            # 详细分析
-            if st.session_state.selected_etf:
-                st.markdown("---")
-                display.display_detailed_analysis(st.session_state.selected_etf, batch_results)
+                    # 详细分析
+                    if st.session_state.selected_etf:
+                        st.markdown("---")
+                        display.display_detailed_analysis(st.session_state.selected_etf, batch_results)
+                else:
+                    st.warning("⚠️ 没有可用的ETF数据")
+            else:
+                st.warning("⚠️ 没有符合条件的结果数据")
 
         with tab2:
             st.subheader("📈 统计分析")
