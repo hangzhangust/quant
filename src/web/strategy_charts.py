@@ -15,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import logging
 
-from src.utils.font_config import get_bilingual_labels, get_font_config
+from src.utils.font_config import get_bilingual_labels, get_font_config, ChartFontContext
 
 logger = logging.getLogger(__name__)
 
@@ -61,38 +61,39 @@ class StrategyChartGenerator:
                     data['avg_win_rate']               # 胜率
                 ]
 
-            # 创建雷达图
-            fig, ax = plt.subplots(figsize=(10, 8), subplot_kw=dict(projection='polar'))
+            # 使用字体上下文管理器创建雷达图
+            with ChartFontContext(self.font_config):
+                fig, ax = plt.subplots(figsize=(10, 8), subplot_kw=dict(projection='polar'))
 
-            # 角度设置
-            angles = np.linspace(0, 2 * np.pi, len(metrics), endpoint=False).tolist()
-            angles += angles[:1]  # 闭合图形
+                # 角度设置
+                angles = np.linspace(0, 2 * np.pi, len(metrics), endpoint=False).tolist()
+                angles += angles[:1]  # 闭合图形
 
-            # 颜色设置
-            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
+                # 颜色设置
+                colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
 
-            # 绘制每个策略
-            for i, strategy in enumerate(strategies):
-                values = normalized_data[strategy]
-                values += values[:1]  # 闭合图形
+                # 绘制每个策略
+                for i, strategy in enumerate(strategies):
+                    values = normalized_data[strategy]
+                    values += values[:1]  # 闭合图形
 
-                ax.plot(angles, values, 'o-', linewidth=2,
-                       label=self.labels.get(strategy, strategy),
-                       color=colors[i % len(colors)])
-                ax.fill(angles, values, alpha=0.25, color=colors[i % len(colors)])
+                    ax.plot(angles, values, 'o-', linewidth=2,
+                           label=self.labels.get(strategy, strategy),
+                           color=colors[i % len(colors)])
+                    ax.fill(angles, values, alpha=0.25, color=colors[i % len(colors)])
 
-            # 设置标签
-            metric_labels = [
-                self.labels['total_return'],
-                self.labels['sharpe_ratio'],
-                self.labels['win_rate']
-            ]
-            ax.set_xticks(angles[:-1])
-            ax.set_xticklabels(metric_labels)
-            ax.set_ylim(0, 1)
-            ax.set_title(self.labels['strategy_comparison'], size=16, pad=20)
-            ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
-            ax.grid(True)
+                # 设置标签
+                metric_labels = [
+                    self.labels['total_return'],
+                    self.labels['sharpe_ratio'],
+                    self.labels['win_rate']
+                ]
+                ax.set_xticks(angles[:-1])
+                ax.set_xticklabels(metric_labels)
+                ax.set_ylim(0, 1)
+                ax.set_title(self.labels['strategy_comparison'], size=16, pad=20)
+                ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
+                ax.grid(True)
 
             return fig
 
@@ -119,39 +120,41 @@ class StrategyChartGenerator:
 
             df = pd.DataFrame(strategy_data)
 
-            # 创建子图
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle(self.labels['strategy_comparison'], fontsize=16)
+            # 使用字体上下文管理器创建子图
+            with ChartFontContext(self.font_config):
+                fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+                fig.suptitle(self.labels['strategy_comparison'], fontsize=16)
 
-            # 1. 总收益率对比箱线图
-            ax1 = axes[0, 0]
-            sns.boxplot(data=df, x='strategy_type', y='total_return', ax=ax1)
-            ax1.set_title(f"{self.labels['total_return']} Distribution")
-            ax1.set_ylabel(self.labels['total_return'])
-            ax1.set_xlabel("Strategy Type")
+                # 1. 总收益率对比箱线图
+                ax1 = axes[0, 0]
+                sns.boxplot(data=df, x='strategy_type', y='total_return', ax=ax1)
+                ax1.set_title(f"{self.labels['total_return']} Distribution")
+                ax1.set_ylabel(self.labels['total_return'])
+                ax1.set_xlabel("Strategy Type")
 
-            # 2. 夏普比率对比箱线图
-            ax2 = axes[0, 1]
-            sns.boxplot(data=df, x='strategy_type', y='sharpe_ratio', ax=ax2)
-            ax2.set_title(f"{self.labels['sharpe_ratio']} Distribution")
-            ax2.set_ylabel(self.labels['sharpe_ratio'])
-            ax2.set_xlabel("Strategy Type")
+                # 2. 夏普比率对比箱线图
+                ax2 = axes[0, 1]
+                sns.boxplot(data=df, x='strategy_type', y='sharpe_ratio', ax=ax2)
+                ax2.set_title(f"{self.labels['sharpe_ratio']} Distribution")
+                ax2.set_ylabel(self.labels['sharpe_ratio'])
+                ax2.set_xlabel("Strategy Type")
 
-            # 3. 最大回撤对比箱线图
-            ax3 = axes[1, 0]
-            sns.boxplot(data=df, x='strategy_type', y='max_drawdown', ax=ax3)
-            ax3.set_title(f"{self.labels['max_drawdown']} Distribution")
-            ax3.set_ylabel(self.labels['max_drawdown'])
-            ax3.set_xlabel("Strategy Type")
+                # 3. 最大回撤对比箱线图
+                ax3 = axes[1, 0]
+                sns.boxplot(data=df, x='strategy_type', y='max_drawdown', ax=ax3)
+                ax3.set_title(f"{self.labels['max_drawdown']} Distribution")
+                ax3.set_ylabel(self.labels['max_drawdown'])
+                ax3.set_xlabel("Strategy Type")
 
-            # 4. 胜率对比箱线图
-            ax4 = axes[1, 1]
-            sns.boxplot(data=df, x='strategy_type', y='win_rate', ax=ax4)
-            ax4.set_title(f"{self.labels['win_rate']} Distribution")
-            ax4.set_ylabel(self.labels['win_rate'])
-            ax4.set_xlabel("Strategy Type")
+                # 4. 胜率对比箱线图
+                ax4 = axes[1, 1]
+                sns.boxplot(data=df, x='strategy_type', y='win_rate', ax=ax4)
+                ax4.set_title(f"{self.labels['win_rate']} Distribution")
+                ax4.set_ylabel(self.labels['win_rate'])
+                ax4.set_xlabel("Strategy Type")
 
-            plt.tight_layout()
+                plt.tight_layout()
+
             return fig
 
         except Exception as e:
@@ -177,29 +180,31 @@ class StrategyChartGenerator:
 
             df = pd.DataFrame(strategy_data)
 
-            fig, ax = plt.subplots(figsize=(12, 8))
+            # 使用字体上下文管理器创建图表
+            with ChartFontContext(self.font_config):
+                fig, ax = plt.subplots(figsize=(12, 8))
 
-            # 按策略类型分组绘制
-            strategies = df['strategy_type'].unique()
-            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
+                # 按策略类型分组绘制
+                strategies = df['strategy_type'].unique()
+                colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
 
-            for i, strategy in enumerate(strategies):
-                strategy_df = df[df['strategy_type'] == strategy]
-                ax.scatter(strategy_df['max_drawdown'], strategy_df['total_return'],
-                          alpha=0.7, s=80, c=colors[i % len(colors)],
-                          label=self.labels.get(strategy, strategy),
-                          edgecolors='black', linewidth=0.5)
+                for i, strategy in enumerate(strategies):
+                    strategy_df = df[df['strategy_type'] == strategy]
+                    ax.scatter(strategy_df['max_drawdown'], strategy_df['total_return'],
+                              alpha=0.7, s=80, c=colors[i % len(colors)],
+                              label=self.labels.get(strategy, strategy),
+                              edgecolors='black', linewidth=0.5)
 
-            # 设置图表属性
-            ax.set_xlabel(self.labels['max_drawdown'])
-            ax.set_ylabel(self.labels['total_return'])
-            ax.set_title(self.labels['risk_return_distribution'])
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+                # 设置图表属性
+                ax.set_xlabel(self.labels['max_drawdown'])
+                ax.set_ylabel(self.labels['total_return'])
+                ax.set_title(self.labels['risk_return_distribution'])
+                ax.legend()
+                ax.grid(True, alpha=0.3)
 
-            # 添加理想区域标注
-            ax.axhspan(0.15, 0.3, alpha=0.1, color='green', label='High Return Zone')
-            ax.axvspan(0, 0.15, alpha=0.1, color='blue', label='Low Risk Zone')
+                # 添加理想区域标注
+                ax.axhspan(0.15, 0.3, alpha=0.1, color='green', label='High Return Zone')
+                ax.axvspan(0, 0.15, alpha=0.1, color='blue', label='Low Risk Zone')
 
             return fig
 

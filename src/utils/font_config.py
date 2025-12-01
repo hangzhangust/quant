@@ -174,6 +174,73 @@ def get_font_config() -> FontConfig:
         _font_config = FontConfig()
     return _font_config
 
+class ChartFontContext:
+    """图表字体上下文管理器 - 确保每个图表都正确应用中文字体"""
+
+    def __init__(self, font_config=None):
+        """初始化字体上下文管理器
+
+        Args:
+            font_config: 字体配置对象，如果为None则使用全局配置
+        """
+        self.font_config = font_config or get_font_config()
+        self.original_params = None
+
+    def __enter__(self):
+        """进入上下文 - 保存原始设置并应用中文字体"""
+        try:
+            # 保存原始设置
+            self.original_params = plt.rcParams.copy()
+            # 应用中文字体配置
+            self._apply_chinese_font()
+        except Exception as e:
+            warnings.warn(f"应用字体上下文失败: {e}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文 - 恢复原始设置"""
+        try:
+            if self.original_params:
+                plt.rcParams.update(self.original_params)
+        except Exception as e:
+            warnings.warn(f"恢复字体上下文失败: {e}")
+
+    def _apply_chinese_font(self):
+        """应用中文字体配置到当前图表"""
+        try:
+            if self.font_config and self.font_config.chinese_font:
+                # 强制设置中文字体
+                plt.rcParams.update({
+                    'font.sans-serif': [
+                        self.font_config.chinese_font,
+                        'SimHei',
+                        'Microsoft YaHei',
+                        'SimSun',
+                        'DejaVu Sans'
+                    ],
+                    'axes.unicode_minus': False,
+                    'font.size': 10,
+                    'axes.titlesize': 12,
+                    'axes.labelsize': 10,
+                    'xtick.labelsize': 9,
+                    'ytick.labelsize': 9,
+                    'legend.fontsize': 9
+                })
+            else:
+                # 回退方案
+                plt.rcParams.update({
+                    'font.sans-serif': ['DejaVu Sans', 'Arial', 'Liberation Sans'],
+                    'axes.unicode_minus': False
+                })
+        except Exception as e:
+            warnings.warn(f"应用中文字体失败: {e}")
+            # 最终回退
+            plt.rcParams.update({
+                'font.sans-serif': ['DejaVu Sans'],
+                'axes.unicode_minus': False
+            })
+
+
 def setup_chinese_fonts():
     """设置中文字体的便捷函数"""
     config = get_font_config()
