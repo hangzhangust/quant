@@ -8,7 +8,8 @@
       "Bash(pip install:*)",
       "Bash(streamlit run:*)",
       "Bash(timeout:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
