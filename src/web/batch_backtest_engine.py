@@ -512,50 +512,55 @@ class BatchBacktestEngine:
             'backtest_time': datetime.now().isoformat()
         }
 
-    def export_results_to_csv(self, results: Dict, output_path: str):
-        """导出结果到CSV"""
+    def export_results_to_csv(self, results: Dict, output_path: str, strategy_filter: Optional[List[str]] = None):
+        """导出结果到CSV - 支持策略过滤
+
+        Args:
+            results: 回测结果
+            output_path: 输出文件路径
+            strategy_filter: 策略过滤器，如果指定则只导出特定策略的结果
+        """
         try:
             if not results or 'individual_results' not in results:
                 logger.error("没有结果数据可导出")
                 return
 
+            # 如果指定了策略过滤器，先过滤结果
+            if strategy_filter:
+                results = self._filter_results_by_strategy(results, strategy_filter)
+
             individual_results = results['individual_results']
-            successful_results = [r for r in individual_results.values() if r.get('success', False)]
-
-            if not successful_results:
-                logger.error("没有成功的结果可导出")
-                return
-
-            # 准备导出数据
             export_data = []
-            for result in successful_results:
-                config = result.get('config', {})
-                metrics = result.get('metrics', {})
-                basic_metrics = metrics.get('basic_metrics', {})
-                trading_metrics = metrics.get('trading_metrics', {})
-                risk_metrics = metrics.get('risk_metrics', {})
 
-                row = {
-                    'ETF名称': result.get('stock_name', ''),
-                    'ETF代码': result.get('symbol', ''),
-                    '当前设置': f"卖出{config.get('sell_percentage', 0):.1f}%/买入{config.get('buy_percentage', 0):.1f}%",
-                    '总收益率': basic_metrics.get('total_return', 0),
-                    '年化收益率': basic_metrics.get('annual_return', 0),
-                    '最大回撤': basic_metrics.get('max_drawdown', 0),
-                    '夏普比率': basic_metrics.get('sharpe_ratio', 0),
-                    '胜率': trading_metrics.get('win_rate', 0),
-                    '交易次数': trading_metrics.get('total_trades', 0),
-                    '平均持仓天数': trading_metrics.get('avg_holding_period', 0),
-                    '总交易成本': trading_metrics.get('total_commission', 0),
-                    'VaR(95%)': risk_metrics.get('var_95', 0),
-                    '年化波动率': risk_metrics.get('volatility', 0),
-                    '最大连续亏损': risk_metrics.get('max_consecutive_losses', 0),
-                    '贝塔系数': risk_metrics.get('beta', 1.0),
-                    '优化建议': '; '.join(result.get('optimization_suggestions', [])),
-                    '风险评级': result.get('risk_rating', '未知'),
-                    '数据质量评分': result.get('data_quality', {}).get('quality_score', 0)
-                }
-                export_data.append(row)
+            # 处理每个结果
+            for symbol, result in individual_results.items():
+                if not result.get('success', False):
+                    continue
+
+                # 检查是否为多策略结果
+                strategies = result.get('strategies', {})
+
+                if strategies:
+                    # 多策略模式 - 导出每个策略的结果
+                    for strategy_type, strategy_result in strategies.items():
+                        if strategy_result.get('success', False):
+                            if strategy_filter and strategy_type not in strategy_filter:
+                                continue
+
+                            row = self._extract_export_data(strategy_result, strategy_type)
+                            export_data.append(row)
+                else:
+                    # 单策略模式
+                    if strategy_filter:
+                        # 如果指定了策略过滤但这是单策略结果，跳过
+                        continue
+
+                    row = self._extract_export_data(result, None)
+                    export_data.append(row)
+
+            if not export_data:
+                logger.warning("没有符合条件的结果可导出")
+                return
 
             # 导出到CSV
             df_export = pd.DataFrame(export_data)
@@ -565,6 +570,113 @@ class BatchBacktestEngine:
 
         except Exception as e:
             logger.error(f"导出结果失败: {e}")
+
+    def _filter_results_by_strategy(self, results: Dict, strategy_filter: List[str]) -> Dict:
+        """根据策略类型过滤结果
+
+        Args:
+            results: 原始结果
+            strategy_filter: 策略过滤器
+
+        Returns:
+            过滤后的结果
+        """
+        try:
+            filtered_results = {'individual_results': {}, 'summary_stats': results.get('summary_stats', {})}
+
+            for symbol, result in results['individual_results'].items():
+                if not result.get('success', False):
+                    continue
+
+                strategies = result.get('strategies', {})
+
+                if strategies:
+                    # 多策略结果 - 只保留指定的策略
+                    filtered_strategies = {}
+                    for strategy_type in strategy_filter:
+                        if strategy_type in strategies and strategies[strategy_type].get('success', False):
+                            filtered_strategies[strategy_type] = strategies[strategy_type]
+
+                    if filtered_strategies:
+                        filtered_result = result.copy()
+                        filtered_result['strategies'] = filtered_strategies
+                        filtered_results['individual_results'][symbol] = filtered_result
+                else:
+                    # 单策略结果 - 如果没有指定策略过滤或结果匹配过滤条件
+                    if not strategy_filter:
+                        filtered_results['individual_results'][symbol] = result
+
+            return filtered_results
+
+        except Exception as e:
+            logger.error(f"过滤结果失败: {e}")
+            return results
+
+    def _extract_export_data(self, result: Dict, strategy_type: Optional[str]) -> Dict:
+        """提取导出数据
+
+        Args:
+            result: 单个策略结果
+            strategy_type: 策略类型
+
+        Returns:
+            导出数据行
+        """
+        try:
+            config = result.get('config', {})
+            metrics = result.get('metrics', {})
+            basic_metrics = metrics.get('basic_metrics', {})
+            trading_metrics = metrics.get('trading_metrics', {})
+            risk_metrics = metrics.get('risk_metrics', {})
+
+            # 格式化策略类型
+            strategy_display = self._format_strategy_type_for_export(strategy_type)
+
+            row = {
+                'ETF名称': result.get('stock_name', ''),
+                'ETF代码': result.get('symbol', ''),
+                '策略类型': strategy_display,
+                '当前设置': f"卖出{config.get('sell_percentage', 0):.1f}%/买入{config.get('buy_percentage', 0):.1f}%",
+                '总收益率': basic_metrics.get('total_return', 0),
+                '年化收益率': basic_metrics.get('annual_return', 0),
+                '最大回撤': basic_metrics.get('max_drawdown', 0),
+                '夏普比率': basic_metrics.get('sharpe_ratio', 0),
+                '胜率': trading_metrics.get('win_rate', 0),
+                '交易次数': trading_metrics.get('total_trades', 0),
+                '平均持仓天数': trading_metrics.get('avg_holding_period', 0),
+                '总交易成本': trading_metrics.get('total_commission', 0),
+                'VaR(95%)': risk_metrics.get('var_95', 0),
+                '年化波动率': risk_metrics.get('volatility', 0),
+                '最大连续亏损': risk_metrics.get('max_consecutive_losses', 0),
+                '贝塔系数': risk_metrics.get('beta', 1.0),
+                '优化建议': '; '.join(result.get('optimization_suggestions', [])),
+                '风险评级': result.get('risk_rating', '未知'),
+                '数据质量评分': result.get('data_quality', {}).get('quality_score', 0)
+            }
+            return row
+
+        except Exception as e:
+            logger.error(f"提取导出数据失败: {e}")
+            return {}
+
+    def _format_strategy_type_for_export(self, strategy_type: Optional[str]) -> str:
+        """格式化策略类型用于导出
+
+        Args:
+            strategy_type: 策略类型
+
+        Returns:
+            格式化的策略类型显示名称
+        """
+        if not strategy_type:
+            return "默认策略"
+
+        strategy_names = {
+            'basic_grid': '基础网格策略',
+            'dynamic_grid': '动态网格策略',
+            'martingale_grid': '马丁格尔网格策略'
+        }
+        return strategy_names.get(strategy_type, strategy_type)
 
     def _generate_strategy_comparison_stats(self, results: Dict, strategy_types: List[str]) -> Dict:
         """
