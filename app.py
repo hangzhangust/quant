@@ -134,6 +134,12 @@ def main():
         # 策略比较选项
         st.markdown("### 🔄 策略比较")
 
+        # 初始化所有变量的默认值
+        strategy_types = ['basic_grid']  # 默认策略类型
+        enable_optimization = False     # 默认不启用优化
+        optimization_method = 'grid_search'  # 默认优化方法
+        max_iterations = 50            # 默认迭代次数
+
         enable_strategy_comparison = st.checkbox(
             "启用多策略比较",
             value=False,

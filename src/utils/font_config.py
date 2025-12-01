@@ -31,42 +31,26 @@ class FontConfig:
             self._use_fallback_fonts()
 
     def _setup_chinese_font(self):
-        """设置中文字体"""
-        chinese_fonts = []
-
+        """设置中文字体 - 简化版本"""
+        # Windows系统优先字体顺序 - 优先使用SimHei
         if self.system == "Windows":
-            chinese_fonts = [
-                "Microsoft YaHei",
-                "Microsoft YaHei UI",
-                "SimHei",
-                "SimSun",
-                "KaiTi"
-            ]
+            chinese_fonts = ["SimHei", "Microsoft YaHei", "SimSun", "KaiTi"]
         elif self.system == "Darwin":  # macOS
-            chinese_fonts = [
-                "PingFang SC",
-                "Hiragino Sans GB",
-                "STXihei",
-                "STSong"
-            ]
+            chinese_fonts = ["PingFang SC", "Hiragino Sans GB", "SimHei", "STXihei"]
         else:  # Linux
-            chinese_fonts = [
-                "WenQuanYi Micro Hei",
-                "DejaVu Sans",
-                "Liberation Sans",
-                "Noto Sans CJK SC"
-            ]
+            chinese_fonts = ["WenQuanYi Micro Hei", "SimHei", "DejaVu Sans"]
 
-        # 查找可用字体
+        # 查找第一个可用的中文字体
         available_fonts = [f.name for f in fm.fontManager.ttflist]
 
+        self.chinese_font = None
         for font_name in chinese_fonts:
             if font_name in available_fonts:
                 self.chinese_font = font_name
                 break
 
-        if not self.chinese_font:
-            # 尝试从系统字体目录查找
+        # 如果没找到，使用手动路径
+        if not self.chinese_font and self.system == "Windows":
             self.chinese_font = self._find_chinese_font_manually()
 
     def _setup_english_font(self):
@@ -116,13 +100,14 @@ class FontConfig:
 
     def _configure_matplotlib(self):
         """配置matplotlib字体设置"""
+        # 强制设置中文字体
         if self.chinese_font:
-            plt.rcParams['font.sans-serif'] = [self.chinese_font]
-        if self.english_font:
-            plt.rcParams['font.family'] = [self.english_font]
-
-        # 解决负号显示问题
-        plt.rcParams['axes.unicode_minus'] = False
+            plt.rcParams['font.sans-serif'] = [self.chinese_font, 'SimHei', 'Microsoft YaHei', 'SimSun']
+            plt.rcParams['axes.unicode_minus'] = False
+        else:
+            # 回退方案
+            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
+            plt.rcParams['axes.unicode_minus'] = False
 
         # 设置字体大小
         plt.rcParams['font.size'] = 10
