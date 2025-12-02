@@ -254,3 +254,46 @@ CACHE_CONFIG = {
     "ttl": 86400,  # 24小时
     "max_size": 1000  # 最大缓存条目数
 }
+
+# 数据源配置
+DATA_SOURCE_CONFIG = {
+    "premium_sources": ["tushare", "wind"],
+    "free_sources": ["akshare", "yfinance"],
+    "fallback_strategy": "auto",
+    "cache_premium_data": True,
+    "retry_attempts": 3,
+    "timeout_seconds": 30,
+    "rate_limiting": {
+        "tushare": {"requests_per_minute": 200},
+        "akshare": {"requests_per_minute": 60},
+        "yfinance": {"requests_per_minute": 120}
+    }
+}
+
+# Beta计算配置
+BENCHMARK_CONFIG = {
+    "default_benchmark": "000300",
+    "auto_fetch_benchmark": True,
+    "cache_benchmark_data": True,
+    "benchmark_data_period": 3,  # years
+    "alternative_benchmarks": {
+        "000001": "上证综指",
+        "000300": "沪深300指数",
+        "000905": "中证500指数",
+        "399001": "深证成指",
+        "399006": "创业板指"
+    },
+    "market_benchmarks": {
+        "SH": "000001",  # 上海市场基准
+        "SZ": "399001",  # 深圳市场基准
+        "HS": "000300"   # 沪深市场基准（默认）
+    }
+}
+
+# 个人配置系统
+PERSONAL_CONFIG = {
+    "env_file": ".env",
+    "auto_reload": True,
+    "validation_on_startup": True,
+    "fallback_to_free_sources": True
+}
