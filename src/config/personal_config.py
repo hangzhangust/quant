@@ -74,14 +74,25 @@ class PersonalConfigManager:
         """加载数据源配置"""
         data_sources = {}
 
-        # Tushare Pro配置
+        # jqdatasdk配置 (主要数据源)
+        data_sources['jqdata'] = DataSourceConfig(
+            name='jqdata',
+            enabled=os.getenv('JQDATA_ENABLED', 'true').lower() == 'true',
+            credentials={
+                'username': os.getenv('JQ_USER_NAME', ''),
+                'password': os.getenv('JQ_PASSWORD', '')
+            },
+            priority=1  # 最高优先级
+        )
+
+        # Tushare Pro配置 (备用数据源)
         data_sources['tushare'] = DataSourceConfig(
             name='tushare',
             enabled=os.getenv('TUSHARE_ENABLED', 'false').lower() == 'true',
             credentials={
                 'token': os.getenv('TUSHARE_TOKEN', '')
             },
-            priority=1  # 最高优先级
+            priority=2  # 第二优先级
         )
 
         # Wind配置
@@ -92,7 +103,7 @@ class PersonalConfigManager:
                 'username': os.getenv('WIND_USERNAME', ''),
                 'password': os.getenv('WIND_PASSWORD', '')
             },
-            priority=2
+            priority=3  # 第三优先级
         )
 
         # AKShare配置（免费数据源）
@@ -117,8 +128,9 @@ class PersonalConfigManager:
         """获取默认配置"""
         return {
             'data_sources': {
-                'tushare': DataSourceConfig('tushare', False, {}, 1),
-                'wind': DataSourceConfig('wind', False, {}, 2),
+                'jqdata': DataSourceConfig('jqdata', False, {}, 1),
+                'tushare': DataSourceConfig('tushare', False, {}, 2),
+                'wind': DataSourceConfig('wind', False, {}, 3),
                 'akshare': DataSourceConfig('akshare', True, {}, 10),
                 'yfinance': DataSourceConfig('yfinance', True, {}, 11)
             },
@@ -150,7 +162,11 @@ class PersonalConfigManager:
             # 验证凭证完整性
             credentials = data_source.credentials.copy()
 
-            if source == 'tushare':
+            if source == 'jqdata':
+                if not credentials.get('username') or not credentials.get('password'):
+                    logger.warning(f"jqdatasdk凭证不完整")
+                    return {}
+            elif source == 'tushare':
                 if not credentials.get('token'):
                     logger.warning(f"Tushare token未配置")
                     return {}
@@ -277,11 +293,15 @@ class PersonalConfigManager:
                     validation_result['enabled_sources'].append(source)
 
                     # 分类数据源
-                    if source in ['tushare', 'wind']:
+                    if source in ['jqdata', 'tushare', 'wind']:
                         validation_result['premium_sources'].append(source)
 
                         # 检查付费数据源凭证
-                        if source == 'tushare' and not config.credentials.get('token'):
+                        if source == 'jqdata':
+                            if not config.credentials.get('username') or not config.credentials.get('password'):
+                                validation_result['errors'].append(f"jqdatasdk凭证不完整")
+                                validation_result['valid'] = False
+                        elif source == 'tushare' and not config.credentials.get('token'):
                             validation_result['errors'].append(f"Tushare token未配置")
                             validation_result['valid'] = False
                         elif source == 'wind':

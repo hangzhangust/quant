@@ -19,6 +19,15 @@ import urllib.request
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# 导入jqdatasdk
+try:
+    import jqdatasdk
+    from jqdatasdk import auth, get_price
+    JQDATA_AVAILABLE = True
+except ImportError:
+    JQDATA_AVAILABLE = False
+    jqdatasdk = None
+
 # 导入个人配置系统
 try:
     from src.config.personal_config import get_personal_config
@@ -64,6 +73,9 @@ class MarketDataFetcher:
         # 配置网络设置
         self._setup_network()
 
+        # 初始化jqdatasdk（如果配置了）
+        self._init_jqdata()
+
         # 初始化Tushare（如果配置了）
         self._init_tushare()
 
@@ -96,6 +108,33 @@ class MarketDataFetcher:
         proxy_handler = urllib.request.ProxyHandler({})
         opener = urllib.request.build_opener(proxy_handler)
         urllib.request.install_opener(opener)
+
+    def _init_jqdata(self):
+        """初始化jqdatasdk"""
+        self.jqdata_initialized = False
+
+        # 检查是否配置了jqdatasdk
+        if self.personal_config and self.personal_config.is_data_source_enabled('jqdata') and JQDATA_AVAILABLE:
+            try:
+                # 获取jqdatasdk凭证
+                credentials = self.personal_config.get_api_credentials('jqdata')
+                username = credentials.get('username')
+                password = credentials.get('password')
+
+                if username and password:
+                    # 使用jqdatasdk认证
+                    jqdatasdk.auth(username, password)
+                    self.jqdata_initialized = True
+                    logger.info("jqdatasdk 初始化成功")
+                else:
+                    logger.warning("jqdatasdk凭证不完整，jqdatasdk功能不可用")
+
+            except Exception as e:
+                logger.error(f"jqdatasdk初始化失败: {e}")
+        elif not JQDATA_AVAILABLE:
+            logger.warning("jqdatasdk包未安装，请运行: pip install jqdatasdk")
+        else:
+            logger.info("jqdatasdk数据源未启用")
 
     def _init_tushare(self):
         """初始化Tushare Pro API"""
@@ -178,6 +217,7 @@ class MarketDataFetcher:
 
         # 映射数据源到对应的基准获取方法
         benchmark_methods = {
+            'jqdata': lambda: self._try_jqdata_benchmark(symbol, start_date, end_date),
             'tushare': lambda: self._try_tushare_benchmark(symbol, start_date, end_date),
             'wind': lambda: self._try_wind_benchmark(symbol, start_date, end_date),
             'akshare': lambda: self._try_akshare_benchmark(symbol, start_date, end_date),
@@ -599,6 +639,7 @@ class MarketDataFetcher:
 
         # 映射数据源到对应的方法
         source_methods = {
+            'jqdata': self._try_jqdata,
             'tushare': self._try_tushare,
             'wind': self._try_wind,  # 预留Wind接口
             'akshare': self._try_akshare_primary,
@@ -773,6 +814,170 @@ class MarketDataFetcher:
         else:
             # 默认尝试上海市场
             return f"{clean_symbol}.SH"
+
+    def _convert_to_jqdata_symbol(self, symbol: str) -> str:
+        """转换证券代码为jqdatasdk格式"""
+        # 移除可能的前缀和后缀
+        clean_symbol = symbol.replace('etf', '').replace('ETF', '').replace('XSHG', '').replace('XSHE', '').replace('SH', '').replace('SZ', '')
+
+        # ETF代码转换
+        if symbol.startswith(('51', '58', '56')):  # 上海ETF
+            return f"{clean_symbol}.XSHG"
+        elif symbol.startswith(('15', '16', '159')):  # 深圳ETF
+            return f"{clean_symbol}.XSHE"
+        # 指数代码转换
+        elif symbol.startswith('000'):  # 深圳指数（如000001.SZ）
+            return f"{clean_symbol}.XSHE"
+        elif symbol.startswith(('399', '0009')):  # 深证成指等
+            return f"{symbol}.XSHE"
+        elif symbol.startswith(('0003', '0009')):  # 沪深300等特殊指数
+            return f"{symbol}.XSHG"
+        # 个股代码转换
+        elif symbol.startswith(('600', '601', '603', '605')):  # 上海A股
+            return f"{clean_symbol}.XSHG"
+        elif symbol.startswith(('000', '001', '002', '003')):  # 深圳A股
+            return f"{clean_symbol}.XSHE"
+        else:
+            # 默认处理为上海市场
+            return f"{clean_symbol}.XSHG"
+
+    def _try_jqdata(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用jqdatasdk获取ETF和个股数据"""
+        if not self.jqdata_initialized:
+            logger.debug("jqdatasdk未初始化")
+            return pd.DataFrame()
+
+        try:
+            # 转换日期格式
+            start_dt = datetime.strptime(start_date, '%Y%m%d')
+            end_dt = datetime.strptime(end_date, '%Y%m%d')
+
+            # 转换证券代码为jqdatasdk格式
+            jq_symbol = self._convert_to_jqdata_symbol(symbol)
+
+            # 获取历史数据
+            data = get_price(
+                security=jq_symbol,
+                start_date=start_dt.strftime('%Y-%m-%d'),
+                end_date=end_dt.strftime('%Y-%m-%d'),
+                frequency='daily'
+            )
+
+            if data is None or data.empty:
+                logger.debug(f"jqdatasdk未获取到数据: {jq_symbol}")
+                return pd.DataFrame()
+
+            # 标准化列名和数据格式
+            data = data.reset_index()
+
+            # 重命名列以匹配标准格式
+            column_mapping = {
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'volume': 'volume'
+            }
+
+            # 应用列名映射
+            for old_col, new_col in column_mapping.items():
+                if old_col in data.columns:
+                    data = data.rename(columns={old_col: new_col})
+
+            # 确保日期列格式正确
+            if 'date' not in data.columns and 'index' in str(data.index.names):
+                data['date'] = data.index
+                data = data.reset_index(drop=True)
+
+            if 'date' in data.columns:
+                data['date'] = pd.to_datetime(data['date'])
+                data = data.sort_values('date').reset_index(drop=True)
+
+            # 选择需要的列
+            required_columns = ['date', 'open', 'high', 'low', 'close']
+            if 'volume' in data.columns:
+                required_columns.append('volume')
+            else:
+                data['volume'] = 0
+
+            # 确保所有必要列都存在
+            for col in ['open', 'high', 'low', 'close']:
+                if col not in data.columns:
+                    logger.warning(f"jqdatasdk数据缺少列: {col}")
+                    data[col] = data['close']  # 使用收盘价填充缺失的价格数据
+
+            logger.info(f"jqdatasdk成功获取数据 {len(data)} 条: {symbol}")
+            return data[required_columns]
+
+        except Exception as e:
+            logger.debug(f"jqdatasdk获取数据失败 {symbol}: {e}")
+            return pd.DataFrame()
+
+    def _try_jqdata_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用jqdatasdk获取基准数据"""
+        if not self.jqdata_initialized:
+            logger.debug("jqdatasdk未初始化")
+            return pd.DataFrame()
+
+        try:
+            # 转换日期格式
+            start_dt = datetime.strptime(start_date, '%Y%m%d')
+            end_dt = datetime.strptime(end_date, '%Y%m%d')
+
+            # 转换指数代码为jqdatasdk格式
+            jq_symbol = self._convert_to_jqdata_symbol(symbol)
+
+            # 获取指数历史数据
+            data = get_price(
+                security=jq_symbol,
+                start_date=start_dt.strftime('%Y-%m-%d'),
+                end_date=end_dt.strftime('%Y-%m-%d'),
+                frequency='daily'
+            )
+
+            if data is None or data.empty:
+                logger.debug(f"jqdatasdk未获取到基准数据: {jq_symbol}")
+                return pd.DataFrame()
+
+            # 标准化数据格式
+            data = data.reset_index()
+
+            # 重命名列以匹配标准格式
+            column_mapping = {
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'volume': 'volume'
+            }
+
+            # 应用列名映射
+            for old_col, new_col in column_mapping.items():
+                if old_col in data.columns:
+                    data = data.rename(columns={old_col: new_col})
+
+            # 确保日期列格式正确
+            if 'date' not in data.columns:
+                data['date'] = data.index
+                data = data.reset_index(drop=True)
+
+            if 'date' in data.columns:
+                data['date'] = pd.to_datetime(data['date'])
+                data = data.sort_values('date').reset_index(drop=True)
+
+            # 确保成交量列存在
+            if 'volume' not in data.columns:
+                data['volume'] = 0
+
+            # 选择需要的列
+            required_columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+
+            logger.info(f"jqdatasdk成功获取基准数据 {len(data)} 条: {symbol}")
+            return data[required_columns]
+
+        except Exception as e:
+            logger.debug(f"jqdatasdk获取基准数据失败 {symbol}: {e}")
+            return pd.DataFrame()
 
     def _try_wind(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用Wind API获取数据（预留接口）"""

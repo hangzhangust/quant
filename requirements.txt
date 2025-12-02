@@ -4,6 +4,7 @@ numpy>=1.21.0
 python-dateutil>=2.8.0
 
 # Data fetching
+jqdatasdk>=1.8.0
 akshare>=1.9.0
 yfinance>=0.1.87
 tushare>=1.2.89
