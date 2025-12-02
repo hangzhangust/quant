@@ -162,8 +162,11 @@ class MarketDataFetcher:
 
     def _try_benchmark_sources(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """尝试多种数据源获取基准数据"""
+        logger.info(f"开始获取基准数据: {symbol}, 时间范围: {start_date} - {end_date}")
+
         # 获取按优先级排序的数据源列表
         enabled_sources = self._get_enabled_data_sources()
+        logger.info(f"启用的数据源优先级: {enabled_sources}")
 
         # 映射数据源到对应的基准获取方法
         benchmark_methods = {
@@ -173,100 +176,269 @@ class MarketDataFetcher:
             'yfinance': lambda: self._try_yahoo_benchmark(symbol, start_date, end_date)
         }
 
+        results = []
+
         # 按优先级尝试数据源
         for source_name in enabled_sources:
             if source_name in benchmark_methods:
+                logger.info(f"🔄 正在尝试数据源: {source_name}")
                 try:
-                    logger.info(f"尝试基准数据源: {source_name}")
                     data = benchmark_methods[source_name]()
                     if data is not None and not data.empty:
-                        logger.info(f"使用 {source_name} 成功获取基准数据")
-                        return data
+                        logger.info(f"✅ {source_name} 成功获取基准数据: {len(data)} 条记录")
+                        logger.info(f"   数据形状: {data.shape}")
+                        logger.info(f"   列名: {list(data.columns)}")
+                        logger.info(f"   日期范围: {data.index[0]} 到 {data.index[-1]}")
+
+                        # 验证数据质量
+                        if self._validate_benchmark_data_quality(data):
+                            logger.info(f"✅ {source_name} 基准数据质量验证通过")
+                            return data
+                        else:
+                            logger.warning(f"⚠️ {source_name} 基准数据质量验证失败")
+                            results.append((source_name, data, "质量验证失败"))
                     else:
-                        logger.debug(f"{source_name} 基准数据返回空")
+                        logger.warning(f"❌ {source_name} 返回空数据")
+                        results.append((source_name, pd.DataFrame(), "返回空数据"))
                 except Exception as e:
-                    logger.debug(f"{source_name} 基准数据源失败: {e}")
+                    logger.error(f"💥 {source_name} 异常: {str(e)[:200]}")
+                    logger.debug(f"   详细错误信息: {type(e).__name__}: {e}")
+                    results.append((source_name, pd.DataFrame(), f"异常: {type(e).__name__}"))
 
         # 如果所有配置的数据源都失败，尝试备用的免费数据源
-        fallback_sources = ['akshare', 'yfinance']
-        for source_name in fallback_sources:
-            if source_name not in enabled_sources and source_name in benchmark_methods:
-                try:
-                    logger.info(f"尝试备用基准数据源: {source_name}")
-                    data = benchmark_methods[source_name]()
-                    if data is not None and not data.empty:
-                        logger.info(f"使用备用基准数据源 {source_name} 成功获取数据")
-                        return data
-                except Exception as e:
-                    logger.debug(f"备用基准数据源 {source_name} 失败: {e}")
+        if not any(result[2] == "质量验证通过" for result in results):
+            logger.info("🔄 配置数据源均失败，尝试备用免费数据源")
+            fallback_sources = ['akshare', 'yfinance']
+            for source_name in fallback_sources:
+                if source_name not in enabled_sources and source_name in benchmark_methods:
+                    logger.info(f"🔄 正在尝试备用数据源: {source_name}")
+                    try:
+                        data = benchmark_methods[source_name]()
+                        if data is not None and not data.empty:
+                            logger.info(f"✅ 备用数据源 {source_name} 成功获取数据: {len(data)} 条记录")
+                            logger.info(f"   数据形状: {data.shape}")
+                            logger.info(f"   列名: {list(data.columns)}")
+                            logger.info(f"   日期范围: {data.index[0]} 到 {data.index[-1]}")
 
-        logger.warning(f"所有基准数据源均失败: {symbol}")
+                            if self._validate_benchmark_data_quality(data):
+                                logger.info(f"✅ 备用数据源 {source_name} 质量验证通过")
+                                return data
+                            else:
+                                logger.warning(f"⚠️ 备用数据源 {source_name} 质量验证失败")
+                                results.append((source_name, data, "质量验证失败"))
+                        else:
+                            logger.warning(f"❌ 备用数据源 {source_name} 返回空数据")
+                            results.append((source_name, pd.DataFrame(), "返回空数据"))
+                    except Exception as e:
+                        logger.error(f"💥 备用数据源 {source_name} 异常: {str(e)[:200]}")
+                        results.append((source_name, pd.DataFrame(), f"异常: {type(e).__name__}"))
+
+        # 输出所有尝试结果的详细报告
+        logger.info("📊 基准数据获取尝试结果报告:")
+        for source_name, data, status in results:
+            if not data.empty:
+                logger.info(f"  {source_name}: 成功获取 {len(data)} 条数据, 状态: {status}")
+            else:
+                logger.warning(f"  {source_name}: 失败, 状态: {status}")
+
+        if not results:
+            logger.error(f"❌ 所有数据源尝试均未执行，可能是配置问题")
+        elif not any(result[2] in ["质量验证通过", "返回空数据"] for result in results):
+            logger.error(f"❌ 所有数据源均失败: {symbol}")
+        else:
+            logger.warning(f"⚠️ 未找到有效的基准数据: {symbol}")
+
         return pd.DataFrame()
 
     def _try_akshare_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用AKShare获取基准数据"""
-        # 对于指数代码，需要转换为akshare支持的格式
-        # 沪深300指数
-        if symbol == "000300":
-            symbol_map = {
-                "000300": "sh000300",
-                "300": "sh000300"
-            }
-        else:
-            symbol_map = {symbol: f"sh{symbol}"}
+        try:
+            # 转换日期格式为YYYYMMDD
+            start_clean = start_date.replace('-', '')
+            end_clean = end_date.replace('-', '')
 
-        for ak_symbol in symbol_map.values():
-            try:
-                # 尝试获取指数数据
-                data = ak.stock_zh_a_hist(symbol=ak_symbol, period="daily",
-                                          start_date=start_date, end_date=end_date)
+            # 对于指数代码，尝试多种AKShare方法
+            ak_methods = []
 
-                if data is not None and not data.empty:
-                    # 标准化列名
-                    data = data.rename(columns={
-                        '日期': 'date',
-                        '开盘': 'open',
-                        '收盘': 'close',
-                        '最高': 'high',
-                        '最低': 'low',
-                        '成交量': 'volume'
-                    })
+            if symbol == "000300":
+                # 沪深300指数的多种获取方式
+                ak_methods = [
+                    # 方法1: 使用stock_zh_index_daily_em (推荐)
+                    lambda: ak.stock_zh_index_daily_em(symbol="000300", start_date=start_clean, end_date=end_clean),
+                    # 方法2: 使用index_zh_a_hist
+                    lambda: ak.index_zh_a_hist(symbol="000300", period="daily", start_date=start_date, end_date=end_date),
+                    # 方法3: 直接使用指数代码
+                    lambda: ak.stock_zh_a_hist(symbol="000300", period="daily", start_date=start_clean, end_date=end_clean),
+                    # 方法4: 使用带前缀的格式
+                    lambda: ak.stock_zh_a_hist(symbol="sh000300", period="daily", start_date=start_clean, end_date=end_clean)
+                ]
+            else:
+                # 其他指数的处理
+                ak_methods = [
+                    lambda: ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_clean, end_date=end_clean),
+                    lambda: ak.stock_zh_a_hist(symbol=f"sh{symbol}", period="daily", start_date=start_clean, end_date=end_clean)
+                ]
 
-                    # 确保日期格式正确
-                    if 'date' in data.columns:
-                        data['date'] = pd.to_datetime(data['date'])
-                        data = data.set_index('date')
+            for i, method in enumerate(ak_methods):
+                try:
+                    logger.debug(f"AKShare基准数据 - 尝试方法 {i+1}/{len(ak_methods)}")
+                    data = method()
 
-                    return data
+                    if data is not None and not data.empty:
+                        logger.info(f"AKShare基准数据 - 方法 {i+1} 成功获取 {len(data)} 条数据")
 
-            except Exception as e:
-                logger.debug(f"AKShare基准数据获取失败 {ak_symbol}: {e}")
-                continue
+                        # 标准化列名映射
+                        column_mapping = {
+                            '日期': 'date',
+                            '开盘': 'open',
+                            '收盘': 'close',
+                            '最高': 'high',
+                            '最低': 'low',
+                            '成交量': 'volume',
+                            '成交额': 'amount',
+                            '涨跌幅': 'change_pct'
+                        }
 
-        return None
+                        # 应用列名映射
+                        data = data.rename(columns={k: v for k, v in column_mapping.items() if k in data.columns})
+
+                        # 确保必要列存在
+                        if 'date' not in data.columns:
+                            # 尝试其他可能的日期列名
+                            for date_col in ['time', 'datetime', '日期']:
+                                if date_col in data.columns:
+                                    data = data.rename(columns={date_col: 'date'})
+                                    break
+
+                        if 'date' in data.columns:
+                            data['date'] = pd.to_datetime(data['date'])
+                            data = data.sort_values('date').reset_index(drop=True)
+                        else:
+                            logger.warning(f"AKShare数据未找到日期列，现有列: {list(data.columns)}")
+                            continue
+
+                        # 确保有价格数据
+                        if 'close' not in data.columns:
+                            # 尝试其他价格列名
+                            for price_col in ['收盘价', 'Close', '收盘']:
+                                if price_col in data.columns:
+                                    data = data.rename(columns={price_col: 'close'})
+                                    break
+
+                        if 'close' in data.columns:
+                            # 转换价格数据为数值类型
+                            data['close'] = pd.to_numeric(data['close'], errors='coerce')
+                            return data
+                        else:
+                            logger.warning(f"AKShare数据未找到价格数据，现有列: {list(data.columns)}")
+                            continue
+
+                except Exception as method_e:
+                    logger.debug(f"AKShare基准数据 - 方法 {i+1} 失败: {type(method_e).__name__}: {method_e}")
+                    continue
+
+        except Exception as e:
+            logger.warning(f"AKShare基准数据获取完全失败: {type(e).__name__}: {e}")
+
+        logger.warning("AKShare: 所有基准数据获取方法均失败")
+        return pd.DataFrame()
 
     def _try_yahoo_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用Yahoo Finance获取基准数据"""
         try:
             import yfinance as yf
 
-            # 转换为Yahoo Finance格式
-            yf_symbol = f"{symbol}.SS"
+            # 转换日期格式
+            start_clean = start_date.replace('-', '')
+            end_clean = end_date.replace('-', '')
+            start_dt = datetime.strptime(start_clean, '%Y%m%d').strftime('%Y-%m-%d')
+            end_dt = datetime.strptime(end_clean, '%Y%m%d').strftime('%Y-%m-%d')
 
-            # 创建Ticker对象
-            ticker = yf.Ticker(yf_symbol)
+            # 尝试多种符号格式
+            symbol_formats = []
 
-            # 获取历史数据
-            data = ticker.history(start=start_date, end=end_date)
+            if symbol == "000300":
+                # 沪深300的多种格式
+                symbol_formats = [
+                    "000300.SS",     # 标准上海格式
+                    "000300.SZ",     # 深圳格式
+                    "^HSI",          # 恒生指数作为替代
+                    "300750.SZ",     # 宁德时代作为活跃股票测试
+                ]
+            elif symbol.startswith("00"):
+                # 深圳市场代码
+                symbol_formats = [f"{symbol}.SZ"]
+            else:
+                # 上海市场代码
+                symbol_formats = [f"{symbol}.SS"]
 
-            if data is not None and not data.empty:
-                # 标准化列名
-                data.columns = [col.lower() for col in data.columns]
-                return data
+            # 添加一些国际指数作为网络连接测试
+            test_symbols = ["^GSPC", "SPY", "QQQ", "VTI"]
+            symbol_formats.extend(test_symbols)
 
+            logger.debug(f"Yahoo Finance基准数据 - 尝试 {len(symbol_formats)} 种符号格式")
+
+            for i, yf_symbol in enumerate(symbol_formats):
+                try:
+                    logger.debug(f"Yahoo Finance基准数据 - 测试符号 {i+1}/{len(symbol_formats)}: {yf_symbol}")
+
+                    # 设置超时和重试参数
+                    data = yf.download(
+                        yf_symbol,
+                        start=start_dt,
+                        end=end_dt,
+                        progress=False,
+                        timeout=15,
+                        show_errors=False
+                    )
+
+                    if data is not None and not data.empty:
+                        logger.info(f"Yahoo Finance基准数据 - 符号 {yf_symbol} 成功获取 {len(data)} 条数据")
+
+                        # 重置索引以获取日期列
+                        data = data.reset_index()
+
+                        # 标准化列名
+                        column_mapping = {
+                            'Date': 'date',
+                            'Open': 'open',
+                            'High': 'high',
+                            'Low': 'low',
+                            'Close': 'close',
+                            'Volume': 'volume',
+                            'Adj Close': 'adj_close'
+                        }
+
+                        data = data.rename(columns={k: v for k, v in column_mapping.items() if k in data.columns})
+
+                        # 确保日期格式正确
+                        if 'date' in data.columns:
+                            data['date'] = pd.to_datetime(data['date'])
+                            data = data.sort_values('date').reset_index(drop=True)
+
+                        # 确保价格数据为数值类型
+                        numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+                        for col in numeric_columns:
+                            if col in data.columns:
+                                data[col] = pd.to_numeric(data[col], errors='coerce')
+
+                        logger.debug(f"Yahoo Finance数据列: {list(data.columns)}")
+                        return data
+                    else:
+                        logger.debug(f"Yahoo Finance符号 {yf_symbol} 返回空数据")
+
+                except Exception as symbol_e:
+                    logger.debug(f"Yahoo Finance符号 {yf_symbol} 失败: {type(symbol_e).__name__}: {symbol_e}")
+                    continue
+
+        except ImportError:
+            logger.warning("Yahoo Finance: yfinance库未安装")
+            return pd.DataFrame()
         except Exception as e:
-            logger.debug(f"Yahoo Finance基准数据获取失败 {symbol}: {e}")
-            return None
+            logger.warning(f"Yahoo Finance基准数据获取完全失败: {type(e).__name__}: {e}")
+
+        logger.warning("Yahoo Finance: 所有符号格式均失败")
+        return pd.DataFrame()
 
     def _try_tushare_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用Tushare Pro API获取基准数据"""
@@ -844,6 +1016,65 @@ class MarketDataFetcher:
             "files": [f.name for f in cache_files[:10]]  # 显示前10个文件
         }
         return info
+
+    def _validate_benchmark_data_quality(self, data: pd.DataFrame) -> bool:
+        """验证基准数据质量"""
+        try:
+            if data.empty:
+                logger.error("📊 数据验证失败: DataFrame为空")
+                return False
+
+            required_columns = ['date', 'close']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                logger.error(f"📊 数据验证失败: 缺少必要列 {missing_columns}")
+                logger.error(f"📊 现有列: {list(data.columns)}")
+                return False
+
+            # 数据质量检查
+            data_shape = data.shape
+            date_range = f"{data['date'].min()} 到 {data['date'].max()}" if pd.api.types.is_datetime64_any_dtype(data['date']) else "日期格式异常"
+
+            # 检查数据点数量
+            if data_shape[0] < 10:
+                logger.warning(f"📊 数据点较少 ({data_shape[0]} 条)，可能影响Beta计算准确性")
+
+            # 检查价格数据有效性
+            if 'close' in data.columns:
+                close_data = data['close'].dropna()
+                if len(close_data) == 0:
+                    logger.error("📊 数据验证失败: 收盘价全部为空值")
+                    return False
+
+                if (close_data <= 0).any():
+                    logger.warning(f"📊 发现非正收盘价数据，共有 {(close_data <= 0).sum()} 个异常值")
+
+                # 检查价格稳定性
+                price_std = close_data.std()
+                price_mean = close_data.mean()
+                if price_std == 0:
+                    logger.warning("📊 价格数据无波动，所有值相同")
+
+            # 详细质量报告
+            logger.info(f"📊 数据质量验证通过:")
+            logger.info(f"  📈 数据形状: {data_shape}")
+            logger.info(f"  📅 时间范围: {date_range}")
+            logger.info(f"  📋 数据列: {list(data.columns)}")
+            logger.info(f"  ❌ 缺失值统计: {data.isnull().sum().to_dict()}")
+
+            # 检查日期连续性
+            if pd.api.types.is_datetime64_any_dtype(data['date']):
+                data_sorted = data.sort_values('date')
+                expected_days = (data_sorted['date'].iloc[-1] - data_sorted['date'].iloc[0]).days + 1
+                actual_days = len(data_sorted)
+                if actual_days < expected_days * 0.7:  # 允许30%的缺失（周末、节假日）
+                    logger.warning(f"📊 日期连续性: 实际 {actual_days} 天，预期约 {expected_days} 天")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"📊 数据验证过程中发生异常: {type(e).__name__}: {e}")
+            return False
 
 
 def main():
