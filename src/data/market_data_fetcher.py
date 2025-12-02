@@ -27,6 +27,14 @@ except ImportError:
     PERSONAL_CONFIG_AVAILABLE = False
     logger.warning("个人配置系统不可用，将使用默认配置")
 
+# 导入模拟数据生成器
+try:
+    from src.data.mock_benchmark_generator import mock_generator
+    MOCK_GENERATOR_AVAILABLE = True
+except ImportError:
+    MOCK_GENERATOR_AVAILABLE = False
+    logger.warning("模拟数据生成器不可用")
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,12 +249,35 @@ class MarketDataFetcher:
             else:
                 logger.warning(f"  {source_name}: 失败, 状态: {status}")
 
+        # 尝试模拟数据作为最后手段
+        if MOCK_GENERATOR_AVAILABLE and mock_generator.is_simulated_data_enabled():
+            logger.info("🎭 所有真实数据源失败，尝试使用模拟数据...")
+            try:
+                mock_data = mock_generator.generate_benchmark_data(symbol, start_date, end_date)
+                if not mock_data.empty and self._validate_benchmark_data_quality(mock_data):
+                    logger.info(f"🎭 模拟基准数据生成成功: {len(mock_data)} 条记录")
+                    logger.warning("⚠️ 注意: 当前使用模拟数据进行Beta计算，请检查网络连接和数据源配置")
+                    return mock_data
+                else:
+                    logger.warning("🎭 模拟数据验证失败")
+            except Exception as mock_e:
+                logger.error(f"🎭 模拟数据生成失败: {type(mock_e).__name__}: {mock_e}")
+
         if not results:
             logger.error(f"❌ 所有数据源尝试均未执行，可能是配置问题")
+            logger.info("💡 建议:")
+            logger.info("   1. 检查网络连接")
+            logger.info("   2. 配置有效的API令牌")
+            logger.info("   3. 设置 MOCK_DATA_ENABLED=true 使用模拟数据进行测试")
         elif not any(result[2] in ["质量验证通过", "返回空数据"] for result in results):
             logger.error(f"❌ 所有数据源均失败: {symbol}")
+            logger.info("💡 建议:")
+            logger.info("   1. 检查网络连接和防火墙设置")
+            logger.info("   2. 验证API令牌有效性")
+            logger.info("   3. 设置 MOCK_DATA_ENABLED=true 使用模拟数据进行测试")
         else:
             logger.warning(f"⚠️ 未找到有效的基准数据: {symbol}")
+            logger.info("💡 建议设置 MOCK_DATA_ENABLED=true 使用模拟数据进行测试")
 
         return pd.DataFrame()
 
