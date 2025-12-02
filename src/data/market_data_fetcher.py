@@ -19,25 +19,45 @@ import urllib.request
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# 导入个人配置系统
+try:
+    from src.config.personal_config import get_personal_config
+    PERSONAL_CONFIG_AVAILABLE = True
+except ImportError:
+    PERSONAL_CONFIG_AVAILABLE = False
+    logger.warning("个人配置系统不可用，将使用默认配置")
+
 logger = logging.getLogger(__name__)
 
 
 class MarketDataFetcher:
     """市场数据获取器类"""
 
-    def __init__(self, cache_dir: str = "cache"):
+    def __init__(self, cache_dir: str = "cache", personal_config=None):
         """
         初始化市场数据获取器
 
         Args:
             cache_dir: 缓存目录
+            personal_config: 个人配置管理器实例，如果为None则使用全局配置
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
         self.cache_ttl = 86400  # 24小时缓存
 
+        # 初始化个人配置
+        if personal_config:
+            self.personal_config = personal_config
+        elif PERSONAL_CONFIG_AVAILABLE:
+            self.personal_config = get_personal_config()
+        else:
+            self.personal_config = None
+
         # 配置网络设置
         self._setup_network()
+
+        # 初始化Tushare（如果配置了）
+        self._init_tushare()
 
     def _setup_network(self):
         """配置网络连接，禁用代理并设置重试机制"""
@@ -68,6 +88,259 @@ class MarketDataFetcher:
         proxy_handler = urllib.request.ProxyHandler({})
         opener = urllib.request.build_opener(proxy_handler)
         urllib.request.install_opener(opener)
+
+    def _init_tushare(self):
+        """初始化Tushare Pro API"""
+        self.tushare_pro = None
+
+        # 检查是否配置了Tushare
+        if self.personal_config and self.personal_config.is_data_source_enabled('tushare'):
+            try:
+                import tushare as ts
+
+                # 获取Tushare token
+                credentials = self.personal_config.get_api_credentials('tushare')
+                token = credentials.get('token')
+
+                if token:
+                    # 设置token并初始化API
+                    ts.set_token(token)
+                    self.tushare_pro = ts.pro_api()
+                    logger.info("Tushare Pro API 初始化成功")
+                else:
+                    logger.warning("Tushare token未配置，Tushare功能不可用")
+
+            except ImportError:
+                logger.error("Tushare包未安装，请运行: pip install tushare")
+            except Exception as e:
+                logger.error(f"Tushare初始化失败: {e}")
+        else:
+            logger.info("Tushare数据源未启用")
+
+    def fetch_benchmark_data(self, benchmark_symbol: str = "000300", start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """
+        获取基准指数数据用于Beta计算
+
+        Args:
+            benchmark_symbol: 基准指数代码，默认沪深300 (000300)
+            start_date: 开始日期，格式YYYYMMDD
+            end_date: 结束日期，格式YYYYMMDD
+
+        Returns:
+            包含OHLCV数据的DataFrame
+        """
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=3*365)).strftime('%Y%m%d')
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y%m%d')
+
+        # 检查缓存
+        cache_key = f"benchmark_{benchmark_symbol}_{start_date}_{end_date}"
+        cached_data = self._load_from_cache(cache_key)
+        if cached_data is not None:
+            logger.info(f"从缓存获取基准数据: {benchmark_symbol}")
+            return cached_data
+
+        try:
+            logger.info(f"获取基准指数数据: {benchmark_symbol}, 时间范围: {start_date} - {end_date}")
+
+            # 尝试获取基准数据
+            data = self._try_benchmark_sources(benchmark_symbol, start_date, end_date)
+
+            if data is not None and not data.empty:
+                # 缓存数据
+                self._save_to_cache(cache_key, data)
+                logger.info(f"成功获取基准数据: {benchmark_symbol}, 数据量: {len(data)}")
+                return data
+            else:
+                logger.warning(f"无法获取基准数据: {benchmark_symbol}")
+                return pd.DataFrame()
+
+        except Exception as e:
+            logger.error(f"获取基准数据失败 {benchmark_symbol}: {e}")
+            return pd.DataFrame()
+
+    def _try_benchmark_sources(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """尝试多种数据源获取基准数据"""
+        # 获取按优先级排序的数据源列表
+        enabled_sources = self._get_enabled_data_sources()
+
+        # 映射数据源到对应的基准获取方法
+        benchmark_methods = {
+            'tushare': lambda: self._try_tushare_benchmark(symbol, start_date, end_date),
+            'wind': lambda: self._try_wind_benchmark(symbol, start_date, end_date),
+            'akshare': lambda: self._try_akshare_benchmark(symbol, start_date, end_date),
+            'yfinance': lambda: self._try_yahoo_benchmark(symbol, start_date, end_date)
+        }
+
+        # 按优先级尝试数据源
+        for source_name in enabled_sources:
+            if source_name in benchmark_methods:
+                try:
+                    logger.info(f"尝试基准数据源: {source_name}")
+                    data = benchmark_methods[source_name]()
+                    if data is not None and not data.empty:
+                        logger.info(f"使用 {source_name} 成功获取基准数据")
+                        return data
+                    else:
+                        logger.debug(f"{source_name} 基准数据返回空")
+                except Exception as e:
+                    logger.debug(f"{source_name} 基准数据源失败: {e}")
+
+        # 如果所有配置的数据源都失败，尝试备用的免费数据源
+        fallback_sources = ['akshare', 'yfinance']
+        for source_name in fallback_sources:
+            if source_name not in enabled_sources and source_name in benchmark_methods:
+                try:
+                    logger.info(f"尝试备用基准数据源: {source_name}")
+                    data = benchmark_methods[source_name]()
+                    if data is not None and not data.empty:
+                        logger.info(f"使用备用基准数据源 {source_name} 成功获取数据")
+                        return data
+                except Exception as e:
+                    logger.debug(f"备用基准数据源 {source_name} 失败: {e}")
+
+        logger.warning(f"所有基准数据源均失败: {symbol}")
+        return pd.DataFrame()
+
+    def _try_akshare_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用AKShare获取基准数据"""
+        # 对于指数代码，需要转换为akshare支持的格式
+        # 沪深300指数
+        if symbol == "000300":
+            symbol_map = {
+                "000300": "sh000300",
+                "300": "sh000300"
+            }
+        else:
+            symbol_map = {symbol: f"sh{symbol}"}
+
+        for ak_symbol in symbol_map.values():
+            try:
+                # 尝试获取指数数据
+                data = ak.stock_zh_a_hist(symbol=ak_symbol, period="daily",
+                                          start_date=start_date, end_date=end_date)
+
+                if data is not None and not data.empty:
+                    # 标准化列名
+                    data = data.rename(columns={
+                        '日期': 'date',
+                        '开盘': 'open',
+                        '收盘': 'close',
+                        '最高': 'high',
+                        '最低': 'low',
+                        '成交量': 'volume'
+                    })
+
+                    # 确保日期格式正确
+                    if 'date' in data.columns:
+                        data['date'] = pd.to_datetime(data['date'])
+                        data = data.set_index('date')
+
+                    return data
+
+            except Exception as e:
+                logger.debug(f"AKShare基准数据获取失败 {ak_symbol}: {e}")
+                continue
+
+        return None
+
+    def _try_yahoo_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用Yahoo Finance获取基准数据"""
+        try:
+            import yfinance as yf
+
+            # 转换为Yahoo Finance格式
+            yf_symbol = f"{symbol}.SS"
+
+            # 创建Ticker对象
+            ticker = yf.Ticker(yf_symbol)
+
+            # 获取历史数据
+            data = ticker.history(start=start_date, end=end_date)
+
+            if data is not None and not data.empty:
+                # 标准化列名
+                data.columns = [col.lower() for col in data.columns]
+                return data
+
+        except Exception as e:
+            logger.debug(f"Yahoo Finance基准数据获取失败 {symbol}: {e}")
+            return None
+
+    def _try_tushare_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用Tushare Pro API获取基准数据"""
+        if self.tushare_pro is None:
+            logger.debug("Tushare Pro未初始化")
+            return pd.DataFrame()
+
+        try:
+            # 转换指数代码为Tushare格式
+            ts_symbol = self._convert_benchmark_to_tushare(symbol)
+
+            # 获取指数日线数据
+            df = self.tushare_pro.index_daily(
+                ts_code=ts_symbol,
+                start_date=start_date,
+                end_date=end_date,
+                fields='ts_code,trade_date,open,high,low,close,vol,amount'
+            )
+
+            if df.empty:
+                logger.debug(f"Tushare未获取到基准数据: {ts_symbol}")
+                return pd.DataFrame()
+
+            # 数据清洗和格式转换
+            df = df.sort_values('trade_date')
+            df['trade_date'] = pd.to_datetime(df['trade_date'], format='%Y%m%d')
+            df = df.set_index('trade_date')
+
+            # 重命名列以匹配标准格式
+            df = df.rename(columns={
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'vol': 'volume',
+                'amount': 'amount'
+            })
+
+            # 选择需要的列
+            df = df[['open', 'high', 'low', 'close', 'volume']]
+
+            logger.info(f"Tushare成功获取基准数据 {len(df)} 条: {symbol}")
+            return df
+
+        except Exception as e:
+            logger.debug(f"Tushare获取基准数据失败 {symbol}: {e}")
+            return pd.DataFrame()
+
+    def _convert_benchmark_to_tushare(self, symbol: str) -> str:
+        """转换指数代码为Tushare格式"""
+        # 沪深300指数
+        if symbol == "000300":
+            return "000300.SH"
+        # 上证综指
+        elif symbol == "000001":
+            return "000001.SH"
+        # 中证500指数
+        elif symbol == "000905":
+            return "000905.SH"
+        # 深证成指
+        elif symbol == "399001":
+            return "399001.SZ"
+        # 创业板指
+        elif symbol == "399006":
+            return "399006.SZ"
+        else:
+            # 默认尝试上海市场
+            return f"{symbol}.SH"
+
+    def _try_wind_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用Wind API获取基准数据（预留接口）"""
+        # Wind集成需要特殊的授权和安装，这里提供基础框架
+        logger.debug("Wind基准数据接口暂未实现")
+        return pd.DataFrame()
 
     def fetch_etf_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
         """
@@ -118,23 +391,60 @@ class MarketDataFetcher:
 
     def _try_data_sources(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """尝试多种数据源，提高数据获取成功率"""
-        sources = [
-            self._try_akshare_primary,
-            self._try_akshare_secondary,
-            self._try_yfinance
-        ]
+        # 获取按优先级排序的数据源列表
+        enabled_sources = self._get_enabled_data_sources()
 
-        for source_func in sources:
-            try:
-                data = source_func(symbol, start_date, end_date)
-                if not data.empty:
-                    logger.info(f"使用 {source_func.__name__} 成功获取数据")
-                    return data
-            except Exception as e:
-                logger.debug(f"{source_func.__name__} 失败: {str(e)[:100]}")
+        # 映射数据源到对应的方法
+        source_methods = {
+            'tushare': self._try_tushare,
+            'wind': self._try_wind,  # 预留Wind接口
+            'akshare': self._try_akshare_primary,
+            'yfinance': self._try_yfinance
+        }
+
+        # 按优先级尝试数据源
+        for source_name in enabled_sources:
+            if source_name in source_methods:
+                source_func = source_methods[source_name]
+                try:
+                    logger.info(f"尝试数据源: {source_name}")
+                    data = source_func(symbol, start_date, end_date)
+                    if not data.empty:
+                        logger.info(f"使用 {source_name} 成功获取数据")
+                        return data
+                    else:
+                        logger.debug(f"{source_name} 返回空数据")
+                except Exception as e:
+                    logger.debug(f"{source_name} 失败: {str(e)[:100]}")
+            else:
+                logger.debug(f"未知数据源: {source_name}")
+
+        # 如果所有配置的数据源都失败，尝试备用的免费数据源
+        fallback_sources = ['akshare', 'yfinance']
+        for source_name in fallback_sources:
+            if source_name not in enabled_sources and source_name in source_methods:
+                logger.info(f"尝试备用数据源: {source_name}")
+                try:
+                    data = source_methods[source_name](symbol, start_date, end_date)
+                    if not data.empty:
+                        logger.info(f"使用备用数据源 {source_name} 成功获取数据")
+                        return data
+                except Exception as e:
+                    logger.debug(f"备用数据源 {source_name} 失败: {str(e)[:100]}")
 
         logger.warning(f"所有数据源均失败: {symbol}")
         return pd.DataFrame()
+
+    def _get_enabled_data_sources(self) -> List[str]:
+        """获取启用的数据源列表，按优先级排序"""
+        if self.personal_config:
+            try:
+                return self.personal_config.get_enabled_data_sources()
+            except Exception as e:
+                logger.error(f"获取启用数据源失败: {e}")
+
+        # 回退到默认数据源
+        return ['akshare', 'yfinance']
 
     def _try_akshare_primary(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """主要akshare数据源 - fund_etf_hist_em"""
@@ -184,6 +494,88 @@ class MarketDataFetcher:
         except Exception as e:
             logger.debug(f"akshare secondary失败: {e}")
             return pd.DataFrame()
+
+    def _try_tushare(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用Tushare Pro API获取数据"""
+        if self.tushare_pro is None:
+            logger.debug("Tushare Pro未初始化")
+            return pd.DataFrame()
+
+        try:
+            # Tushare需要特定的股票代码格式
+            ts_symbol = self._convert_to_tushare_symbol(symbol)
+
+            # 获取基础信息确定股票类型
+            basic_info = self.tushare_pro.basic(
+                ts_code=ts_symbol,
+                fields='ts_code,name,area,industry,list_date'
+            )
+
+            if basic_info.empty:
+                logger.debug(f"Tushare未找到股票代码: {ts_symbol}")
+                return pd.DataFrame()
+
+            # 根据股票类型获取日线数据
+            if ts_symbol.endswith('.SH') or ts_symbol.endswith('.SZ'):
+                # A股或ETF
+                df = self.tushare_pro.daily(
+                    ts_code=ts_symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    fields='ts_code,trade_date,open,high,low,close,pre_close,vol,amount'
+                )
+            else:
+                logger.debug(f"不支持的股票代码格式: {ts_symbol}")
+                return pd.DataFrame()
+
+            if df.empty:
+                logger.debug(f"Tushare未获取到数据: {ts_symbol}")
+                return pd.DataFrame()
+
+            # 数据清洗和格式转换
+            df = df.sort_values('trade_date')
+            df['trade_date'] = pd.to_datetime(df['trade_date'], format='%Y%m%d')
+            df = df.set_index('trade_date')
+
+            # 重命名列以匹配标准格式
+            df = df.rename(columns={
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'vol': 'volume',
+                'amount': 'amount'
+            })
+
+            # 选择需要的列
+            df = df[['open', 'high', 'low', 'close', 'volume']]
+
+            logger.info(f"Tushare成功获取 {len(df)} 条数据: {symbol}")
+            return df
+
+        except Exception as e:
+            logger.debug(f"Tushare获取数据失败 {symbol}: {e}")
+            return pd.DataFrame()
+
+    def _convert_to_tushare_symbol(self, symbol: str) -> str:
+        """转换ETF代码为Tushare格式"""
+        # 移除可能的前缀和后缀
+        clean_symbol = symbol.replace('etf', '').replace('ETF', '').replace('SH', '').replace('SZ', '')
+
+        # 确定市场后缀
+        if symbol.startswith(('51', '58', '56')):  # 上海市场ETF
+            return f"{clean_symbol}.SH"
+        elif symbol.startswith(('15', '16', '159')):  # 深圳市场ETF
+            return f"{clean_symbol}.SZ"
+        else:
+            # 默认尝试上海市场
+            return f"{clean_symbol}.SH"
+
+    def _try_wind(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用Wind API获取数据（预留接口）"""
+        # Wind集成需要特殊的授权和安装，这里提供基础框架
+        logger.debug("Wind接口暂未实现")
+        return pd.DataFrame()
 
     def _try_yfinance(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用yfinance获取数据（需要pip install yfinance）"""

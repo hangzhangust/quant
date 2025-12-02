@@ -8,7 +8,7 @@ Batch Backtest Engine
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -21,23 +21,44 @@ from src.strategies.grid_strategy import create_grid_strategy
 from src.core.backtest_engine import BacktestEngine, BacktestConfig
 from src.analysis.metrics_calculator import MetricsCalculator
 
+# 导入个人配置系统
+try:
+    from src.config.personal_config import get_personal_config
+    PERSONAL_CONFIG_AVAILABLE = True
+except ImportError:
+    PERSONAL_CONFIG_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
 class BatchBacktestEngine:
     """批量回测引擎"""
 
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, max_workers: int = 4, personal_config=None):
         """
         初始化批量回测引擎
 
         Args:
             max_workers: 最大并行工作线程数
+            personal_config: 个人配置管理器实例，如果为None则使用全局配置
         """
         self.max_workers = max_workers
         self.parser = GridConfigParser()
-        self.data_fetcher = MarketDataFetcher()
-        self.metrics_calculator = MetricsCalculator()
+
+        # 初始化个人配置
+        if personal_config:
+            self.personal_config = personal_config
+        elif PERSONAL_CONFIG_AVAILABLE:
+            self.personal_config = get_personal_config()
+        else:
+            self.personal_config = None
+
+        # 初始化数据获取器，传入个人配置
+        self.data_fetcher = MarketDataFetcher(personal_config=self.personal_config)
+
+        # 初始化基准数据和计算器
+        self.benchmark_data = self._initialize_benchmark_data()
+        self.metrics_calculator = MetricsCalculator(self.benchmark_data)
 
     def run_batch_backtest(self, config_data: pd.DataFrame,
                           progress_callback=None, strategy_types: List[str] = None) -> Dict:
@@ -821,6 +842,92 @@ class BatchBacktestEngine:
             logger.error(f"准备策略比较数据失败: {e}")
             return {'error': str(e)}
 
+    def _initialize_benchmark_data(self) -> pd.DataFrame:
+        """
+        初始化基准数据用于Beta计算
+
+        Returns:
+            基准数据DataFrame，如果失败则返回空DataFrame
+        """
+        try:
+            # 使用个人配置中的默认基准指数
+            if self.personal_config:
+                benchmark_symbol = self.personal_config.get_default_benchmark()
+                logger.info(f"使用个人配置的基准指数: {benchmark_symbol}")
+            else:
+                benchmark_symbol = "000300"  # 回退到默认沪深300指数
+
+            # 获取最近3年的数据
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=3*365)).strftime('%Y%m%d')
+
+            logger.info(f"初始化基准数据: {benchmark_symbol}, 时间范围: {start_date} - {end_date}")
+
+            # 获取基准数据
+            benchmark_data = self.data_fetcher.fetch_benchmark_data(
+                benchmark_symbol=benchmark_symbol,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            if benchmark_data is not None and not benchmark_data.empty:
+                logger.info(f"成功获取基准数据，数据量: {len(benchmark_data)}")
+
+                # 验证数据质量
+                if self._validate_benchmark_data(benchmark_data):
+                    logger.info("基准数据验证通过")
+                    return benchmark_data
+                else:
+                    logger.warning("基准数据验证失败，将使用默认Beta值")
+            else:
+                logger.warning("无法获取基准数据，Beta计算将使用默认值1.0")
+
+            return pd.DataFrame()
+
+        except Exception as e:
+            logger.error(f"初始化基准数据失败: {e}")
+            return pd.DataFrame()
+
+    def _validate_benchmark_data(self, data: pd.DataFrame) -> bool:
+        """
+        验证基准数据质量
+
+        Args:
+            data: 基准数据DataFrame
+
+        Returns:
+            验证是否通过
+        """
+        try:
+            # 检查基本要求
+            if data is None or data.empty:
+                return False
+
+            # 检查必要的列
+            required_columns = ['close']  # 至少需要收盘价
+            for col in required_columns:
+                if col not in data.columns:
+                    logger.warning(f"基准数据缺少必要列: {col}")
+                    return False
+
+            # 检查数据量
+            if len(data) < 30:  # 至少需要30个交易日
+                logger.warning(f"基准数据量不足: {len(data)} < 30")
+                return False
+
+            # 检查数据连续性
+            if 'close' in data.columns:
+                close_series = data['close'].dropna()
+                if len(close_series) < len(data) * 0.8:  # 至少80%的数据是有效的
+                    logger.warning("基准数据连续性不足")
+                    return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"基准数据验证失败: {e}")
+            return False
+
 
 def main():
     """测试函数"""
@@ -856,6 +963,7 @@ def main():
     # 导出结果
     engine.export_results_to_csv(results, 'batch_backtest_results.csv')
 
+  
 
 if __name__ == "__main__":
     main()
