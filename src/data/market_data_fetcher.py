@@ -691,8 +691,81 @@ class MarketDataFetcher:
         return ['akshare', 'yfinance']
 
     def _try_akshare_primary(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """主要akshare数据源 - fund_etf_hist_em"""
+        """主要akshare数据源 - 优先使用可用的方法"""
+
+        # 方法1: 尝试 fund_etf_hist_sina (这个方法工作正常)
         try:
+            # 转换代码格式
+            if symbol.startswith('51'):
+                sina_symbol = f"sh{symbol}"  # 上海ETF
+            elif symbol.startswith('15'):
+                sina_symbol = f"sz{symbol}"  # 深圳ETF
+            else:
+                sina_symbol = symbol
+
+            logger.debug(f"尝试AKShare新浪方法: {sina_symbol}")
+            data = ak.fund_etf_hist_sina(symbol=sina_symbol)
+
+            if data is not None and not data.empty:
+                # 过滤日期范围
+                data['date'] = pd.to_datetime(data['date'])
+                start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+
+                # 过滤日期
+                filtered_data = data[
+                    (data['date'] >= start_dt) & (data['date'] <= end_dt)
+                ].copy()
+
+                # 确保列名标准化
+                if all(col in filtered_data.columns for col in ['date', 'open', 'high', 'low', 'close', 'volume']):
+                    logger.info(f"AKShare新浪方法成功获取 {len(filtered_data)} 条数据")
+                    return filtered_data
+                else:
+                    logger.debug(f"AKShare新浪方法数据列不完整: {filtered_data.columns.tolist()}")
+
+        except Exception as e:
+            logger.debug(f"AKShare新浪方法失败: {e}")
+
+        # 方法2: 尝试 stock_zh_a_hist (备用方法)
+        try:
+            logger.debug(f"尝试AKShare股票历史数据方法: {symbol}")
+            data = ak.stock_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="hfq"
+            )
+
+            if data is not None and not data.empty:
+                # 标准化列名映射
+                column_mapping = {
+                    '日期': 'date',
+                    '开盘': 'open',
+                    '最高': 'high',
+                    '最低': 'low',
+                    '收盘': 'close',
+                    '成交量': 'volume',
+                    '成交额': 'amount'
+                }
+
+                standardized_data = pd.DataFrame()
+                for old_name, new_name in column_mapping.items():
+                    if old_name in data.columns:
+                        standardized_data[new_name] = data[old_name]
+
+                # 确保必要列存在
+                if all(col in standardized_data.columns for col in ['date', 'open', 'high', 'low', 'close', 'volume']):
+                    logger.info(f"AKShare股票历史方法成功获取 {len(standardized_data)} 条数据")
+                    return standardized_data
+
+        except Exception as e:
+            logger.debug(f"AKShare股票历史方法失败: {e}")
+
+        # 方法3: 尝试 fund_etf_hist_em (这个方法有代理问题，但最后尝试)
+        try:
+            logger.debug(f"尝试AKShare东方财富方法: {symbol}")
             data = ak.fund_etf_hist_em(
                 symbol=symbol,
                 period="daily",
@@ -700,10 +773,15 @@ class MarketDataFetcher:
                 end_date=end_date,
                 adjust="hfq"
             )
-            return data
+            if data is not None and not data.empty:
+                logger.info(f"AKShare东方财富方法成功获取 {len(data)} 条数据")
+                return data
+
         except Exception as e:
-            logger.debug(f"akshare primary失败: {e}")
-            return pd.DataFrame()
+            logger.debug(f"AKShare东方财富方法失败: {e}")
+
+        logger.debug(f"所有AKShare方法都失败了: {symbol}")
+        return pd.DataFrame()
 
     def _try_akshare_secondary(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """备选akshare数据源 - fund_etf_hist_sina"""

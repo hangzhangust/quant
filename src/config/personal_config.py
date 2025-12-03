@@ -52,12 +52,23 @@ class PersonalConfigManager:
     def _load_env_config(self) -> None:
         """从环境变量加载配置"""
         try:
-            # 尝试加载.env文件
-            if os.path.exists(self.env_file):
-                load_dotenv(self.env_file)
-                logger.info(f"已加载环境变量文件: {self.env_file}")
-            else:
-                logger.warning(f"环境变量文件不存在: {self.env_file}")
+            # 尝试多个.env文件位置
+            env_files = [
+                self.env_file,  # 默认位置 (项目根目录)
+                "src/data/.env",  # 旧位置
+                os.path.join(os.getcwd(), self.env_file),  # 绝对路径
+            ]
+
+            loaded_env = False
+            for env_file in env_files:
+                if os.path.exists(env_file):
+                    load_dotenv(env_file)
+                    logger.info(f"已加载环境变量文件: {env_file}")
+                    loaded_env = True
+                    break
+
+            if not loaded_env:
+                logger.warning(f"未找到任何环境变量文件，尝试位置: {env_files}")
 
             # 加载数据源配置
             self.config['data_sources'] = self._load_data_sources_config()
