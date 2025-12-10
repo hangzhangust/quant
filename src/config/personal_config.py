@@ -133,6 +133,14 @@ class PersonalConfigManager:
             priority=11  # 最低优先级
         )
 
+        # XTQuant配置（高质量免费数据源）
+        data_sources['xtquant'] = DataSourceConfig(
+            name='xtquant',
+            enabled=os.getenv('XTQUANT_ENABLED', 'true').lower() == 'true',  # 默认启用
+            credentials={},  # xtquant通常不需要API凭证
+            priority=9  # 高质量免费数据源，在AKShare之前
+        )
+
         return data_sources
 
     def _get_default_config(self) -> Dict[str, Any]:
@@ -142,6 +150,7 @@ class PersonalConfigManager:
                 'jqdata': DataSourceConfig('jqdata', False, {}, 1),
                 'tushare': DataSourceConfig('tushare', False, {}, 2),
                 'wind': DataSourceConfig('wind', False, {}, 3),
+                'xtquant': DataSourceConfig('xtquant', True, {}, 9),  # 默认启用
                 'akshare': DataSourceConfig('akshare', True, {}, 10),
                 'yfinance': DataSourceConfig('yfinance', True, {}, 11)
             },

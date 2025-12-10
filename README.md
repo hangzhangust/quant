@@ -94,6 +94,8 @@ quant/
 - **错误处理**: 完善的异常处理和错误恢复机制
 - **数据质量**: 自动评估数据质量和完整性
 - **风险评级**: 智能风险评级和管理建议
+- **多数据源**: 支持jqdatasdk、tushare、XTQuant、akshare、yfinance等多种数据源
+- **实时数据**: XTQuant实时数据订阅和推送功能
 
 ## 测试示例
 
@@ -103,6 +105,40 @@ quant/
 - 芯片ETF (159995)
 
 可用于测试系统的完整功能。
+
+## 数据源支持
+
+系统集成了多种数据源，按优先级自动切换：
+
+### 🏆 付费数据源（高质量）
+1. **jqdatasdk** (优先级1) - 聚宽，专业量化数据
+2. **Tushare Pro** (优先级2) - Tushare专业版
+3. **Wind** (优先级3) - 万得金融终端
+
+### 🆓 免费数据源
+4. **XTQuant** (优先级9) - 迅投，高质量免费数据源 ✨
+   - 支持实时数据订阅
+   - 本地数据缓存
+   - 自动增量更新
+   - 详细文档: [XTQUANT_INTEGRATION.md](XTQUANT_INTEGRATION.md)
+5. **AKShare** (优先级10) - AKShare免费数据
+6. **Yahoo Finance** (优先级11) - 雅虎财经国际数据
+
+### 📡 实时数据功能
+
+XTQuant提供完整的实时数据支持：
+- 实时价格推送
+- 自定义回调处理
+- 多标的同时订阅
+- 订阅状态管理
+
+```bash
+# 安装XTQuant
+pip install xtquant
+
+# 运行集成测试
+python test_xtquant_integration.py
+```
 
 ## 注意事项
 

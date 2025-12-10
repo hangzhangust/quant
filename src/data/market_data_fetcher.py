@@ -28,6 +28,14 @@ except ImportError:
     JQDATA_AVAILABLE = False
     jqdatasdk = None
 
+# 导入xtquant
+try:
+    from xtquant import xtdata
+    XTQUANT_AVAILABLE = True
+except ImportError:
+    XTQUANT_AVAILABLE = False
+    xtdata = None
+
 # 导入个人配置系统
 try:
     from src.config.personal_config import get_personal_config
@@ -78,6 +86,9 @@ class MarketDataFetcher:
 
         # 初始化Tushare（如果配置了）
         self._init_tushare()
+
+        # 初始化XTQuant（如果配置了）
+        self._init_xtquant()
 
     def _setup_network(self):
         """配置网络连接，禁用代理并设置重试机制"""
@@ -164,6 +175,34 @@ class MarketDataFetcher:
         else:
             logger.info("Tushare数据源未启用")
 
+    def _init_xtquant(self):
+        """初始化XTQuant"""
+        self.xtquant_initialized = False
+
+        # 检查是否启用了xtquant
+        if self.personal_config and self.personal_config.is_data_source_enabled('xtquant') and XTQUANT_AVAILABLE:
+            try:
+                # xtquant通常不需要认证，但需要MiniQmt支持
+                # 尝试连接测试
+                test_result = xtdata.get_market_data_ex([], ["000001.SZ"], period="1d", count=1)
+                self.xtquant_initialized = True
+                logger.info("XTQuant 初始化成功")
+
+                # 设置本地数据目录
+                if hasattr(xtdata, 'set_data_path'):
+                    # 可以设置自定义数据路径
+                    cache_dir = str(self.cache_dir / "xtquant_data")
+                    xtdata.set_data_path(cache_dir)
+                    logger.info(f"XTQuant 数据目录设置为: {cache_dir}")
+
+            except Exception as e:
+                logger.error(f"XTQuant初始化失败: {e}")
+                logger.warning("请确保MiniQmt已正确安装和配置")
+        elif not XTQUANT_AVAILABLE:
+            logger.warning("XTQuant包未安装，请运行: pip install xtquant")
+        else:
+            logger.info("XTQuant数据源未启用")
+
     def fetch_benchmark_data(self, benchmark_symbol: str = "000300", start_date: str = None, end_date: str = None) -> pd.DataFrame:
         """
         获取基准指数数据用于Beta计算
@@ -220,6 +259,7 @@ class MarketDataFetcher:
             'jqdata': lambda: self._try_jqdata_benchmark(symbol, start_date, end_date),
             'tushare': lambda: self._try_tushare_benchmark(symbol, start_date, end_date),
             'wind': lambda: self._try_wind_benchmark(symbol, start_date, end_date),
+            'xtquant': lambda: self._try_xtquant_benchmark(symbol, start_date, end_date),
             'akshare': lambda: self._try_akshare_benchmark(symbol, start_date, end_date),
             'yfinance': lambda: self._try_yahoo_benchmark(symbol, start_date, end_date)
         }
@@ -642,6 +682,7 @@ class MarketDataFetcher:
             'jqdata': self._try_jqdata,
             'tushare': self._try_tushare,
             'wind': self._try_wind,  # 预留Wind接口
+            'xtquant': self._try_xtquant,
             'akshare': self._try_akshare_primary,
             'yfinance': self._try_yfinance
         }
@@ -1057,6 +1098,127 @@ class MarketDataFetcher:
             logger.debug(f"jqdatasdk获取基准数据失败 {symbol}: {e}")
             return pd.DataFrame()
 
+    def _try_xtquant_benchmark(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用XTQuant获取基准指数数据"""
+        if not self.xtquant_initialized or not XTQUANT_AVAILABLE:
+            logger.debug("XTQuant未初始化或不可用")
+            return pd.DataFrame()
+
+        try:
+            logger.info(f"XTQuant: 开始获取基准指数数据 {symbol}")
+
+            # 转换日期格式
+            start_dt = datetime.strptime(start_date, '%Y%m%d')
+            end_dt = datetime.strptime(end_date, '%Y%m%d')
+
+            # 转换指数代码为XTQuant格式
+            xt_symbol = self._convert_to_xtquant_symbol(symbol)
+            logger.debug(f"XTQuant: 转换后基准代码 {xt_symbol}")
+
+            # 首先尝试获取数据，如果没有则先下载
+            data = xtdata.get_market_data_ex([], [xt_symbol], period="1d", count=-1)
+
+            if data is None or not data or xt_symbol not in data:
+                logger.info(f"XTQuant: 本地无基准数据，开始下载 {xt_symbol}")
+                # 下载基准指数历史数据
+                xtdata.download_history_data(xt_symbol, period="1d", incrementally=True)
+                # 再次获取数据
+                data = xtdata.get_market_data_ex([], [xt_symbol], period="1d", count=-1)
+
+            if not data or xt_symbol not in data:
+                logger.warning(f"XTQuant: 下载后仍无法获取基准数据 {xt_symbol}")
+                return pd.DataFrame()
+
+            # 处理XTQuant返回的数据格式
+            df = data[xt_symbol]
+
+            # 将数据转换为DataFrame
+            ohlc_data = []
+            for timestamp, row_data in df.items():
+                # timestamp是时间戳格式
+                date = pd.to_datetime(timestamp)
+
+                # 提取OHLCV数据
+                if isinstance(row_data, dict) or len(row_data) >= 4:
+                    open_price = float(row_data[0]) if len(row_data) > 0 else 0
+                    high_price = float(row_data[1]) if len(row_data) > 1 else 0
+                    low_price = float(row_data[2]) if len(row_data) > 2 else 0
+                    close_price = float(row_data[3]) if len(row_data) > 3 else 0
+                    volume = float(row_data[4]) if len(row_data) > 4 else 0
+
+                    ohlc_data.append({
+                        'date': date,
+                        'open': open_price,
+                        'high': high_price,
+                        'low': low_price,
+                        'close': close_price,
+                        'volume': volume
+                    })
+
+            if not ohlc_data:
+                logger.warning(f"XTQuant: 无有效基准OHLCV数据 {xt_symbol}")
+                return pd.DataFrame()
+
+            # 创建DataFrame
+            result_df = pd.DataFrame(ohlc_data)
+            result_df = result_df.sort_values('date').reset_index(drop=True)
+
+            # 过滤日期范围
+            start_date_filtered = result_df['date'] >= start_dt
+            end_date_filtered = result_df['date'] <= end_dt
+            filtered_df = result_df[start_date_filtered & end_date_filtered].copy()
+
+            if filtered_df.empty:
+                logger.warning(f"XTQuant: 过滤后无基准数据 {xt_symbol}, 原始数据范围: {result_df['date'].min()} 到 {result_df['date'].max()}")
+                return pd.DataFrame()
+
+            # 验证基准数据质量
+            if not self._validate_xtquant_benchmark_data(filtered_df):
+                logger.warning(f"XTQuant: 基准数据质量验证失败 {xt_symbol}")
+                return pd.DataFrame()
+
+            logger.info(f"XTQuant: 成功获取基准数据 {symbol}, 数据量: {len(filtered_df)}")
+            return filtered_df
+
+        except Exception as e:
+            logger.debug(f"XTQuant获取基准数据失败 {symbol}: {type(e).__name__}: {e}")
+            return pd.DataFrame()
+
+    def _validate_xtquant_benchmark_data(self, data: pd.DataFrame) -> bool:
+        """验证XTQuant基准数据质量"""
+        try:
+            if data.empty:
+                logger.error("XTQuant基准数据验证失败: DataFrame为空")
+                return False
+
+            # 检查必要列
+            required_columns = ['date', 'close']
+            for col in required_columns:
+                if col not in data.columns:
+                    logger.error(f"XTQuant基准数据验证失败: 缺少列 {col}")
+                    return False
+
+            # 检查价格数据有效性
+            close_prices = data['close'].dropna()
+            if len(close_prices) == 0:
+                logger.error("XTQuant基准数据验证失败: 无有效价格数据")
+                return False
+
+            # 检查价格是否为正数
+            if (close_prices <= 0).any():
+                logger.warning(f"XTQuant基准数据警告: 发现非正价格 {(close_prices <= 0).sum()} 个")
+
+            # 检查数据量
+            if len(data) < 10:
+                logger.warning(f"XTQuant基准数据警告: 数据点较少 {len(data)} 个，可能影响Beta计算")
+
+            logger.debug(f"XTQuant基准数据验证通过: {len(data)} 条数据, 价格范围 {close_prices.min():.4f} - {close_prices.max():.4f}")
+            return True
+
+        except Exception as e:
+            logger.error(f"XTQuant基准数据验证过程异常: {type(e).__name__}: {e}")
+            return False
+
     def _try_wind(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用Wind API获取数据（预留接口）"""
         # Wind集成需要特殊的授权和安装，这里提供基础框架
@@ -1111,6 +1273,109 @@ class MarketDataFetcher:
         except Exception as e:
             logger.debug(f"yfinance获取失败: {e}")
             return pd.DataFrame()
+
+    def _try_xtquant(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用XTQuant获取ETF数据"""
+        if not self.xtquant_initialized or not XTQUANT_AVAILABLE:
+            logger.debug("XTQuant未初始化或不可用")
+            return pd.DataFrame()
+
+        try:
+            logger.info(f"XTQuant: 开始获取ETF数据 {symbol}")
+
+            # 转换日期格式
+            start_dt = datetime.strptime(start_date, '%Y%m%d')
+            end_dt = datetime.strptime(end_date, '%Y%m%d')
+
+            # 转换ETF代码为XTQuant格式
+            xt_symbol = self._convert_to_xtquant_symbol(symbol)
+            logger.debug(f"XTQuant: 转换后代码 {xt_symbol}")
+
+            # 首先尝试获取数据，如果没有则先下载
+            data = xtdata.get_market_data_ex([], [xt_symbol], period="1d", count=-1)
+
+            if data is None or not data or xt_symbol not in data:
+                logger.info(f"XTQuant: 本地无数据，开始下载 {xt_symbol}")
+                # 下载历史数据
+                xtdata.download_history_data(xt_symbol, period="1d", incrementally=True)
+                # 再次获取数据
+                data = xtdata.get_market_data_ex([], [xt_symbol], period="1d", count=-1)
+
+            if not data or xt_symbol not in data:
+                logger.warning(f"XTQuant: 下载后仍无法获取数据 {xt_symbol}")
+                return pd.DataFrame()
+
+            # 处理XTQuant返回的数据格式
+            df = data[xt_symbol]
+
+            # 将数据转换为DataFrame
+            ohlc_data = []
+            for timestamp, row_data in df.items():
+                # timestamp是时间戳格式
+                date = pd.to_datetime(timestamp)
+
+                # 提取OHLCV数据（根据XTQuant返回格式调整）
+                if isinstance(row_data, dict) or len(row_data) >= 4:
+                    open_price = float(row_data[0]) if len(row_data) > 0 else 0
+                    high_price = float(row_data[1]) if len(row_data) > 1 else 0
+                    low_price = float(row_data[2]) if len(row_data) > 2 else 0
+                    close_price = float(row_data[3]) if len(row_data) > 3 else 0
+                    volume = float(row_data[4]) if len(row_data) > 4 else 0
+
+                    ohlc_data.append({
+                        'date': date,
+                        'open': open_price,
+                        'high': high_price,
+                        'low': low_price,
+                        'close': close_price,
+                        'volume': volume
+                    })
+
+            if not ohlc_data:
+                logger.warning(f"XTQuant: 无有效OHLCV数据 {xt_symbol}")
+                return pd.DataFrame()
+
+            # 创建DataFrame
+            result_df = pd.DataFrame(ohlc_data)
+            result_df = result_df.sort_values('date').reset_index(drop=True)
+
+            # 过滤日期范围
+            start_date_filtered = result_df['date'] >= start_dt
+            end_date_filtered = result_df['date'] <= end_dt
+            filtered_df = result_df[start_date_filtered & end_date_filtered].copy()
+
+            if filtered_df.empty:
+                logger.warning(f"XTQuant: 过滤后无数据 {xt_symbol}, 原始数据范围: {result_df['date'].min()} 到 {result_df['date'].max()}")
+                return pd.DataFrame()
+
+            logger.info(f"XTQuant: 成功获取ETF数据 {symbol}, 数据量: {len(filtered_df)}")
+            return filtered_df
+
+        except Exception as e:
+            logger.error(f"XTQuant获取ETF数据失败 {symbol}: {type(e).__name__}: {e}")
+            return pd.DataFrame()
+
+    def _convert_to_xtquant_symbol(self, symbol: str) -> str:
+        """转换ETF/股票代码为XTQuant格式"""
+        # 移除可能的前缀和后缀
+        clean_symbol = symbol.replace('etf', '').replace('ETF', '').replace('SH', '').replace('SZ', '')
+
+        # 根据代码前缀确定市场和格式
+        if symbol.startswith(('51', '58', '56')):  # 上海市场ETF
+            return f"{clean_symbol}.SZ"  # XTQuant中上海ETF使用.SZ后缀
+        elif symbol.startswith(('15', '16', '159')):  # 深圳市场ETF
+            return f"{clean_symbol}.SZ"
+        elif symbol.startswith(('600', '601', '603', '605')):  # 上海A股
+            return f"{clean_symbol}.SH"
+        elif symbol.startswith(('000', '001', '002', '003')):  # 深圳A股
+            return f"{clean_symbol}.SZ"
+        elif symbol == "000300":  # 沪深300指数
+            return "000300.SH"
+        elif symbol.startswith('000'):  # 深圳指数
+            return f"{symbol}.SZ"
+        else:
+            # 默认尝试深圳市场
+            return f"{clean_symbol}.SZ"
 
     def _clean_and_standardize_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """清洗和标准化数据"""
@@ -1389,6 +1654,212 @@ class MarketDataFetcher:
         except Exception as e:
             logger.error(f"📊 数据验证过程中发生异常: {type(e).__name__}: {e}")
             return False
+
+    # ==================== XTQuant 实时订阅功能 ====================
+
+    def subscribe_xtquant_realtime(self, symbols: List[str], callback=None, period: str = "1d"):
+        """
+        使用XTQuant订阅实时数据
+
+        Args:
+            symbols: 证券代码列表
+            callback: 回调函数，接收(data)参数
+            period: 数据周期，默认"1d"
+
+        Returns:
+            订阅成功状态
+        """
+        if not self.xtquant_initialized or not XTQUANT_AVAILABLE:
+            logger.error("XTQuant未初始化，无法订阅实时数据")
+            return False
+
+        try:
+            # 转换符号格式
+            xt_symbols = [self._convert_to_xtquant_symbol(symbol) for symbol in symbols]
+
+            logger.info(f"XTQuant: 开始订阅实时数据 {xt_symbols}")
+
+            # 存储订阅状态
+            if not hasattr(self, '_xtquant_subscriptions'):
+                self._xtquant_subscriptions = {}
+
+            for symbol, xt_symbol in zip(symbols, xt_symbols):
+                try:
+                    # 先下载历史数据确保有基础数据
+                    xtdata.download_history_data(xt_symbol, period=period, incrementally=True)
+
+                    # 订阅实时数据
+                    if callback:
+                        xtdata.subscribe_quote(xt_symbol, period=period, count=-1, callback=callback)
+                    else:
+                        # 使用默认回调函数
+                        default_callback = self._default_xtquant_callback
+                        xtdata.subscribe_quote(xt_symbol, period=period, count=-1, callback=default_callback)
+
+                    self._xtquant_subscriptions[symbol] = {
+                        'xt_symbol': xt_symbol,
+                        'period': period,
+                        'callback': callback or default_callback,
+                        'subscribed_at': datetime.now()
+                    }
+
+                    logger.info(f"XTQuant: 成功订阅 {symbol} ({xt_symbol})")
+
+                except Exception as e:
+                    logger.error(f"XTQuant: 订阅失败 {symbol} ({xt_symbol}): {e}")
+                    continue
+
+            logger.info(f"XTQuant: 实时订阅完成，成功订阅 {len(self._xtquant_subscriptions)}/{len(symbols)} 个标的")
+            return len(self._xtquant_subscriptions) > 0
+
+        except Exception as e:
+            logger.error(f"XTQuant: 实时订阅异常: {type(e).__name__}: {e}")
+            return False
+
+    def _default_xtquant_callback(self, data):
+        """
+        XTQuant默认回调函数
+
+        Args:
+            data: XTQuant推送的数据
+        """
+        try:
+            if not data:
+                return
+
+            # 解析回调数据
+            symbol_list = list(data.keys())
+            if not symbol_list:
+                return
+
+            for xt_symbol in symbol_list:
+                symbol_data = data[xt_symbol]
+                if symbol_data is None:
+                    continue
+
+                # 尝试获取最新价格数据
+                try:
+                    latest_data = xtdata.get_market_data_ex([], [xt_symbol], period="1d", count=1)
+                    if latest_data and xt_symbol in latest_data:
+                        latest_df = latest_data[xt_symbol]
+                        if not latest_df.empty:
+                            # 获取最新一条数据
+                            latest_timestamp = list(latest_df.keys())[-1]
+                            latest_price_data = latest_df[latest_timestamp]
+
+                            # 转换为可读格式
+                            current_price = float(latest_price_data[3]) if len(latest_price_data) > 3 else 0
+                            current_time = pd.to_datetime(latest_timestamp)
+
+                            logger.info(f"XTQuant实时数据: {xt_symbol} 价格:{current_price:.4f} 时间:{current_time}")
+
+                except Exception as parse_e:
+                    logger.debug(f"XTQuant回调数据解析失败: {parse_e}")
+
+        except Exception as e:
+            logger.error(f"XTQuant默认回调异常: {type(e).__name__}: {e}")
+
+    def unsubscribe_xtquant_realtime(self, symbols: List[str] = None):
+        """
+        取消XTQuant实时数据订阅
+
+        Args:
+            symbols: 要取消订阅的证券代码列表，None表示取消所有
+        """
+        if not hasattr(self, '_xtquant_subscriptions') or not self._xtquant_subscriptions:
+            logger.info("XTQuant: 无活跃订阅")
+            return
+
+        try:
+            if symbols is None:
+                # 取消所有订阅
+                symbols_to_unsubscribe = list(self._xtquant_subscriptions.keys())
+            else:
+                # 只取消指定的订阅
+                symbols_to_unsubscribe = [s for s in symbols if s in self._xtquant_subscriptions]
+
+            unsubscribed_count = 0
+            for symbol in symbols_to_unsubscribe:
+                if symbol in self._xtquant_subscriptions:
+                    xt_symbol = self._xtquant_subscriptions[symbol]['xt_symbol']
+                    try:
+                        # XTQuant取消订阅
+                        if hasattr(xtdata, 'unsubscribe_quote'):
+                            xtdata.unsubscribe_quote(xt_symbol)
+
+                        del self._xtquant_subscriptions[symbol]
+                        unsubscribed_count += 1
+                        logger.info(f"XTQuant: 取消订阅成功 {symbol} ({xt_symbol})")
+
+                    except Exception as e:
+                        logger.error(f"XTQuant: 取消订阅失败 {symbol}: {e}")
+
+            logger.info(f"XTQuant: 取消订阅完成，成功取消 {unsubscribed_count}/{len(symbols_to_unsubscribe)} 个订阅")
+
+        except Exception as e:
+            logger.error(f"XTQuant: 取消订阅异常: {type(e).__name__}: {e}")
+
+    def get_xtquant_subscription_status(self) -> Dict:
+        """
+        获取XTQuant实时订阅状态
+
+        Returns:
+            订阅状态信息
+        """
+        if not hasattr(self, '_xtquant_subscriptions'):
+            return {
+                'enabled': False,
+                'total_subscriptions': 0,
+                'subscriptions': []
+            }
+
+        status = {
+            'enabled': len(self._xtquant_subscriptions) > 0,
+            'total_subscriptions': len(self._xtquant_subscriptions),
+            'xtquant_initialized': self.xtquant_initialized,
+            'subscriptions': []
+        }
+
+        for symbol, info in self._xtquant_subscriptions.items():
+            subscription_time = info['subscribed_at']
+            duration = datetime.now() - subscription_time
+
+            status['subscriptions'].append({
+                'symbol': symbol,
+                'xt_symbol': info['xt_symbol'],
+                'period': info['period'],
+                'subscribed_at': subscription_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'duration_seconds': int(duration.total_seconds())
+            })
+
+        return status
+
+    def start_xtquant_realtime_loop(self):
+        """
+        启动XTQuant实时数据循环（阻塞模式）
+
+        注意：此方法会阻塞当前线程，适合在独立线程中运行
+        """
+        if not self.xtquant_initialized or not XTQUANT_AVAILABLE:
+            logger.error("XTQuant未初始化，无法启动实时循环")
+            return
+
+        if not hasattr(self, '_xtquant_subscriptions') or not self._xtquant_subscriptions:
+            logger.warning("XTQuant: 无活跃订阅，但将启动实时循环等待订阅")
+        else:
+            logger.info(f"XTQuant: 启动实时循环，监控 {len(self._xtquant_subscriptions)} 个订阅")
+
+        try:
+            logger.info("XTQuant: 实时数据循环已启动，按Ctrl+C停止...")
+            # 启动XTQuant实时数据循环
+            xtdata.run()
+
+        except KeyboardInterrupt:
+            logger.info("XTQuant: 用户中断，停止实时数据循环")
+        except Exception as e:
+            logger.error(f"XTQuant: 实时循环异常: {type(e).__name__}: {e}")
+        finally:
+            logger.info("XTQuant: 实时数据循环已停止")
 
 
 def main():
